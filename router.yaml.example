@@ -1,0 +1,65 @@
+# gentle-ai-model-router central configuration (example).
+# Copy to router.yaml and adjust. All sections consumed by Phase 1+ code.
+
+data_sources:
+  artificial_analysis:
+    base_url: "https://artificialanalysis.ai"
+    endpoints:
+      models: "/api/v2/language/models"
+      models_free: "/api/v2/language/models/free"
+    # Responses are snapshotted verbatim under data/snapshots/ before use.
+    snapshot_dir: "data/snapshots/artificial-analysis"
+    cache_ttl_hours: 24
+  lmarena:
+    dataset: "lmarena-ai/leaderboard-dataset"
+    splits: ["latest"]          # "full" for history
+    # Verified configs (2026-09-18). NOTE: no "math" config exists.
+    categories: ["text", "webdev", "agent", "search"]
+  local_discovery:
+    opencode_config: "~/.config/opencode/opencode.json"
+    opencode_variants_cache: "~/.gentle-ai/cache/model-variants.json"
+    pi_models: "~/.pi/gentle-ai/models.json"
+    codex_profiles_dir: "~/.codex"
+    claude_agents_dir: "~/.claude/agents"
+
+registry:
+  database_url: "postgresql+psycopg://router:router@localhost:5432/model_router"
+  sqlite_fallback: "sqlite:///./model_router.sqlite"   # dev only
+
+# Per-phase quality floors: P(success | phase, candidate) must stay >= floor.
+# 11 SDD phases exist in Gentle AI (incl. init/research/archive/onboard).
+phase_thresholds:
+  sdd-explore: { min_success_rate: 0.80 }
+  sdd-propose: { min_success_rate: 0.80 }
+  sdd-spec:    { min_success_rate: 0.85 }
+  sdd-design:  { min_success_rate: 0.85 }
+  sdd-tasks:   { min_success_rate: 0.85 }
+  sdd-apply:   { min_success_rate: 0.90 }
+  sdd-verify:  { min_success_rate: 0.90 }
+
+token_weights:
+  # Objective: minimize tokens_per_success. Weights let reasoning/cache
+  # tokens count differently per deployment contract (cache reads are cheaper).
+  input: 1.0
+  output: 1.0
+  reasoning: 1.0
+  cache_read: 0.1
+  cache_write: 0.5
+
+escalation:
+  max_escalations_per_run: 2
+  cooldown_minutes: 30
+  # Ordered ladder per phase: start cheap, climb only when the quality floor
+  # is at risk. Model ids are registry keys, filled in Phase 1.
+  ladders:
+    sdd-explore: []
+    sdd-apply: []
+
+api_server:
+  host: "127.0.0.1"
+  port: 8377
+  route_path: "/route"
+
+logging:
+  level: "INFO"
+  provenance: true   # every pick logs ranker score, prior/telemetry weight, constraint check

@@ -76,9 +76,8 @@ Commit per work unit on a feature branch.
 - [ ] **T5** — Dataset bridge: `dataset/builder.py` reads shim executions and emits
   `label_provenance=PROVENANCE_TELEMETRY` examples (schema version bump if actual
   cost/tokens/latency fields are added).
-- [ ] **T6** — Pi adapter: `integration/pi_adapter.py` (pure JSON round trip),
-  `models.json` resolution chain, `sdd-<phase>` → `{model, thinking}`, atomic
-  writes + backup + rollback + read_assignments; CLI `router integrate pi`.
+- [x] **T6** — Pi adapter ✅ 427f48c (31 tests; models.json chain, object-form
+  writes, atomic+backup+rollback, `router integrate pi`)
 - [ ] **T7** — Codex adapter (state-file route): extend gentle-state-style writing
   to `CodexModelAssignments` / `CodexPhaseModelAssignments` /
   `CodexCarrilModelAssignments`; effort-subset mapping (low|medium|high|xhigh);
@@ -98,5 +97,6 @@ Commit per work unit on a feature branch.
 
 ## Progress log
 
-- 2026-09-19 — T1–T4 done in work unit 939d62b (bandit core). Full suite 267
-  passed; assess risk=medium; spot check 42/42. Next: T6 Pi adapter.
+- 2026-09-19 — T6 done in 427f48c (Pi adapter). Suite 298 passed; assess
+  medium; spot check 31/31. Deviation accepted: bare-string upgrade writes the
+  requested model (same convention as gentle-state adapter). Next: T7 Codex.

@@ -11,8 +11,11 @@ reads (never modifying the Gentle AI repo itself):
   under ``external-single-active`` strategy; refuses ``__managed_by`` blocks;
 - Pi: ``.pi/gentle-ai/models.json`` entries for sdd-* agent keys
   ({model, thinking});
-- Codex: carril profile TOMLs plus per-phase table inputs
-  (spawn_agent requires fork_turns="none" for overrides);
+- Codex (state-file route ONLY): CodexPhaseModelAssignments /
+  CodexModelAssignments (sdd_<phase> / sdd-<carrile> keys) in
+  ~/.gentle-ai/state.json — direct ~/.codex/*.config.toml writing is
+  unsupported (overwritten by gentle-ai sync; whole-session tiers do not
+  reach spawned sub-agents);
 - Claude: agent frontmatter model/effort (weakest surface: sync re-renders
   from persisted presets, so re-apply after sync).
 

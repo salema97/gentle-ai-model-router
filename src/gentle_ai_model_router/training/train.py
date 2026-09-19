@@ -76,6 +76,7 @@ def train(
             "pip install 'gentle-ai-model-router[train]'"
         ) from exc
 
+    from gentle_ai_model_router.training.device import resolve_device
     from gentle_ai_model_router.training.model import (
         build_model,
         collate_examples,
@@ -90,6 +91,12 @@ def train(
     set_seed(training.seed)
     np.random.seed(training.seed)
     torch.manual_seed(training.seed)
+
+    # Resolve the device up front (fail fast on --device cuda without a GPU
+    # or an invalid value) and log it clearly; placement happens once the
+    # model exists below. Trainer respects an already-placed model.
+    device = resolve_device(training.device, torch.cuda.is_available())
+    logger.info("training device=%s", device)
 
     numeric_dim = len(dataset.model_feature_names) + len(dataset.benchmark_feature_names)
     tokenizer = AutoTokenizer.from_pretrained(training.model_name)
@@ -152,6 +159,8 @@ def train(
 
     else:  # pragma: no cover - config validation happens earlier
         raise ValueError(f"unknown objective '{training.objective}'")
+
+    model.to(device)
 
     if not train_rows:
         raise ValueError(
@@ -231,6 +240,6 @@ def train(
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     run_config = training.model_dump()
     run_config["dataset_path"] = str(dataset_path)
-    (out_dir / "config.json").write_text(json.dumps(run_config, indent=2) + "\n")
+    (out_dir / "training_config.json").write_text(json.dumps(run_config, indent=2) + "\n")
     logger.info("training done: %s", out_dir)
     return out_dir

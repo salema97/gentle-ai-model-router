@@ -15,7 +15,7 @@ from gentle_ai_model_router.training.model import (  # noqa: E402
     build_model,
     collate_examples,
     encode_pair_text,
-    tiny_deberta_config,
+    tiny_modernbert_config,
 )
 from gentle_ai_model_router.training.model_pairwise import (  # noqa: E402
     build_pairwise_model,
@@ -42,7 +42,7 @@ class _FakeTokenizer:
 
 
 def _tiny():
-    return tiny_deberta_config()
+    return tiny_modernbert_config()
 
 
 def test_pointwise_forward_shape() -> None:

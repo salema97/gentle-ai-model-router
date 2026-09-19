@@ -98,12 +98,16 @@ def evaluate_routers(
     config: RouterConfig,
     session: Any = None,
     ranker: tuple[Any, Any] | None = None,
+    batch_size: int = 64,
+    device: str = "auto",
 ) -> dict[str, Any]:
     """Evaluate reference routers (and an optional ranker) on all splits.
 
     ``ranker`` = (model, tokenizer) from training/checkpoints; requires the
     [train] extra. When ``session`` is given, the deterministic policy is
-    added as a reference chooser.
+    added as a reference chooser. ``batch_size``/``device`` only affect the
+    learned-ranker chooser (batched scoring); baselines-only runs never
+    import torch.
     """
     choosers: dict[str, Chooser] = {
         "fixed_strong": fixed_strong_chooser,
@@ -113,7 +117,9 @@ def evaluate_routers(
     if session is not None:
         choosers["baseline_policy"] = policy_chooser(session, config)
     if ranker is not None:
-        choosers["learned_ranker"] = _ranker_chooser(dataset, *ranker)
+        choosers["learned_ranker"] = _ranker_chooser(
+            dataset, *ranker, batch_size=batch_size, device=device
+        )
 
     results: dict[str, Any] = {
         "splits": {},
@@ -284,35 +290,107 @@ def _evaluate_chooser(
     return metrics
 
 
-def _ranker_chooser(dataset: DatasetV1, model: Any, tokenizer: Any) -> Chooser:
-    """Chooser from a trained checkpoint: argmax ranker score within a group."""
-    import torch  # lazy: [train] extra
-
+def _example_text(dataset: DatasetV1, e: DatasetExample) -> str:
+    """Encoder input text for one example (kept in one place for reuse)."""
     from gentle_ai_model_router.dataset.builder import render_features_text
     from gentle_ai_model_router.training.model import encode_pair_text
 
-    model.eval()
+    return encode_pair_text(
+        e.task_text,
+        e.candidate.model,
+        e.candidate.deployment,
+        e.candidate.effort,
+        render_features_text(
+            list(dataset.model_feature_names) + list(e.benchmark_feature_names),
+            list(e.model_features) + list(e.benchmark_features),
+        ),
+    )
 
-    def score(e: DatasetExample) -> float:
-        text = encode_pair_text(
-            e.task_text,
-            e.candidate.model,
-            e.candidate.deployment,
-            e.candidate.effort,
-            render_features_text(
-                list(dataset.model_feature_names) + list(e.benchmark_feature_names),
-                list(e.model_features) + list(e.benchmark_features),
-            ),
+
+def _score_group(
+    model: Any,
+    tokenizer: Any,
+    texts: list[str],
+    numeric_rows: list[list[float]],
+    *,
+    batch_size: int,
+    device: str,
+) -> list[float]:
+    """Score one group's candidates in batches on the resolved device.
+
+    Batched (padded) tokenization + one forward pass per batch instead of one
+    forward per example: the old single-example loop took >30 min on CPU for
+    a full validation split. Called under torch.no_grad with model.eval() by
+    the chooser; scores map back to examples by position.
+    """
+    import torch  # lazy: [train] extra
+
+    from gentle_ai_model_router.training.device import resolve_device
+
+    resolved = resolve_device(device, torch.cuda.is_available())
+    scores: list[float] = []
+    for start in range(0, len(texts), batch_size):
+        enc = tokenizer(
+            texts[start : start + batch_size],
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
         )
-        enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
         numeric = torch.tensor(
-            [e.model_features + e.benchmark_features], dtype=torch.float32
+            numeric_rows[start : start + batch_size], dtype=torch.float32
         )
         with torch.no_grad():
-            return float(model(enc["input_ids"], enc["attention_mask"], numeric)[0])
+            out = model(
+                enc["input_ids"].to(resolved),
+                enc["attention_mask"].to(resolved),
+                numeric.to(resolved),
+            )
+        scores.extend(float(v) for v in out.tolist())
+    return scores
+
+
+def _ranker_chooser(
+    dataset: DatasetV1,
+    model: Any,
+    tokenizer: Any,
+    batch_size: int = 64,
+    device: str = "auto",
+) -> Chooser:
+    """Chooser from a trained checkpoint: argmax ranker score within a group.
+
+    Scores are computed in BATCHES on the resolved device (cuda when
+    available). The chooser contract (group in -> chosen example out) and the
+    tie-break (lower candidate key wins equal scores) are identical to the
+    old single-example version.
+    """
+    import torch  # lazy: [train] extra
+
+    from gentle_ai_model_router.training.device import resolve_device
+
+    resolved = resolve_device(device, torch.cuda.is_available())
+    model.to(resolved)
+    model.eval()
+    logger.info("evaluation device=%s batch_size=%d", resolved, batch_size)
 
     def choose(group: list[DatasetExample]) -> DatasetExample:
-        return min(group, key=lambda e: (-score(e), e.candidate.key))
+        texts = [_example_text(dataset, e) for e in group]
+        numeric_rows = [list(e.model_features) + list(e.benchmark_features) for e in group]
+        scores = _score_group(
+            model,
+            tokenizer,
+            texts,
+            numeric_rows,
+            batch_size=batch_size,
+            device=device,
+        )
+        # min() is stable: on equal (-score, key) the earliest candidate wins,
+        # exactly like the old per-example key function.
+        best = min(
+            range(len(group)),
+            key=lambda i: (-scores[i], group[i].candidate.key),
+        )
+        return group[best]
 
     return choose
 
@@ -328,13 +406,31 @@ def evaluate_dataset(
     session: Any = None,
     checkpoint: str | Path | None = None,
     output_path: str | Path | None = None,
+    batch_size: int | None = None,
+    device: str | None = None,
 ) -> dict[str, Any]:
-    """Load a dataset (+ optional checkpoint) and run the full evaluation."""
+    """Load a dataset (+ optional checkpoint) and run the full evaluation.
+
+    ``batch_size``/``device`` override ``config.evaluation`` for the learned
+    ranker only; both are ignored (and torch never imported) when no
+    checkpoint is given.
+    """
     dataset = load_dataset(dataset_path)
     ranker = None
     if checkpoint is not None:
         ranker = _load_checkpoint(checkpoint)
-    results = evaluate_routers(dataset, config, session=session, ranker=ranker)
+    eval_batch_size = batch_size if batch_size is not None else config.evaluation.batch_size
+    eval_device = device if device is not None else config.evaluation.device
+    results = evaluate_routers(
+        dataset,
+        config,
+        session=session,
+        ranker=ranker,
+        batch_size=eval_batch_size,
+        device=eval_device,
+    )
+    if ranker is not None:
+        results["ranker_eval"] = {"device": eval_device, "batch_size": eval_batch_size}
     results["dataset"] = {"name": dataset.name, "version": dataset.version}
     if checkpoint is not None:
         results["checkpoint"] = str(checkpoint)
@@ -353,6 +449,13 @@ def _load_checkpoint(checkpoint: str | Path) -> tuple[Any, Any]:
             "pip install 'gentle-ai-model-router[train]'"
         ) from exc
     path = Path(checkpoint)
+    if (path / "head.pt").exists():
+        # New format: full ranker wrapper (encoder + MLP head) — required by
+        # the chooser's forward(input_ids, attention_mask, numeric) contract.
+        from gentle_ai_model_router.training.model import load_ranker
+
+        return load_ranker(str(path))
+    # Legacy format: raw encoder only (no head.pt); kept for backward compat.
     model = AutoModel.from_pretrained(path)
     tokenizer = AutoTokenizer.from_pretrained(path)
     return model, tokenizer

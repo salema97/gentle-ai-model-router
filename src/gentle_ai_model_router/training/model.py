@@ -1,4 +1,4 @@
-"""DeBERTa-V3 ranker model: text encoder + numeric-feature MLP branch.
+"""ModernBERT ranker model: text encoder + numeric-feature MLP branch.
 
 This is a RANKER (scalar score per (query, candidate)), not a multiclass
 classifier: the objective is to order candidates by expected utility, which
@@ -17,7 +17,7 @@ Both branches feed one scalar head; the score is comparable across
 candidates of the same task group.
 
 Heavy deps (torch/transformers) are imported lazily so the base install and
-all core tests stay light. Use :func:`tiny_deberta_config` in tests to build
+all core tests stay light. Use :func:`tiny_modernbert_config` in tests to build
 a random-initialized tiny encoder — no HF downloads, fully offline.
 """
 
@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover
     import torch
-    from transformers import DebertaV2Config
+    from transformers import ModernBertConfig
 
 
 def _require_train_extra() -> None:
@@ -40,54 +40,59 @@ def _require_train_extra() -> None:
         ) from exc
 
 
-def tiny_deberta_config(
+def tiny_modernbert_config(
     hidden_size: int = 96,
     num_hidden_layers: int = 2,
     num_attention_heads: int = 4,
     intermediate_size: int = 192,
     vocab_size: int = 1024,
     max_position_embeddings: int = 256,
-) -> DebertaV2Config:
-    """Random-initialized tiny DeBERTa-V2 config for tests/dev smoke runs.
+) -> ModernBertConfig:
+    """Random-initialized tiny ModernBERT config for tests/dev smoke runs.
 
     Deliberately NOT a pretrained checkpoint: tests must never download from
     Hugging Face. Vocab/max positions are small because the smoke tests feed
     synthetic token ids, not real text.
     """
     _require_train_extra()
-    from transformers import DebertaV2Config
+    from transformers import ModernBertConfig
 
-    return DebertaV2Config(
+    return ModernBertConfig(
         hidden_size=hidden_size,
         num_hidden_layers=num_hidden_layers,
         num_attention_heads=num_attention_heads,
         intermediate_size=intermediate_size,
         vocab_size=vocab_size,
         max_position_embeddings=max_position_embeddings,
-        pooler_hidden_size=hidden_size,
-        pooler_num_attention_heads=num_attention_heads,
-        relative_attention=True,
-        max_relative_positions=64,
-        norm_rel_ebd="layer_norm",
-        position_buckets=256,
+        sliding_window=32,
+        global_attn_every_n_layers=2,
+        # The real ModernBERT special ids exceed the tiny test vocab;
+        # remap them inside the synthetic range (tests feed fake ids).
+        pad_token_id=0,
+        unk_token_id=1,
+        cls_token_id=2,
+        sep_token_id=3,
+        eos_token_id=4,
+        mask_token_id=5,
     )
 
 
 def build_model(
-    model_name: str = "microsoft/deberta-v3-base",
+    model_name: str = "answerdotai/ModernBERT-base",
     numeric_dim: int = 0,
-    tiny_config: DebertaV2Config | None = None,
+    tiny_config: Any | None = None,
 ) -> torch.nn.Module:
-    """Pointwise ranker: DeBERTa encoder + numeric MLP branch → scalar score.
+    """Pointwise ranker: ModernBERT encoder + numeric MLP branch → scalar score.
 
     ``tiny_config`` overrides ``model_name`` (random init, offline tests).
+    Any encoder config with ``hidden_size`` works (resolved via AutoModel).
     """
     _require_train_extra()
     import torch
-    from transformers import AutoModel, DebertaV2Model
+    from transformers import AutoModel
 
     if tiny_config is not None:
-        encoder = DebertaV2Model(tiny_config)
+        encoder = AutoModel.from_config(tiny_config)
         hidden = tiny_config.hidden_size
     else:
         encoder = AutoModel.from_pretrained(model_name)
@@ -131,6 +136,53 @@ def build_model(
             torch.save(self.head.state_dict(), out / "head.pt")
 
     return _Ranker()
+
+
+def load_ranker(path: str, numeric_dim: int | None = None) -> tuple[Any, Any]:
+    """Rebuild the pointwise ranker wrapper from a checkpoint directory.
+
+    Checkpoints store the encoder in HF format at the dir root plus the MLP
+    head weights in ``head.pt``. ``numeric_dim`` is inferred from the head's
+    first-layer input width when not given. Returns (ranker, tokenizer).
+    """
+    _require_train_extra()
+    from pathlib import Path
+
+    import torch
+    from transformers import AutoModel, AutoTokenizer
+
+    path = Path(path)
+    encoder = AutoModel.from_pretrained(path)
+    head_sd = torch.load(path / "head.pt", weights_only=True)
+    hidden = encoder.config.hidden_size
+    if numeric_dim is None:
+        numeric_dim = int(head_sd["0.weight"].shape[1]) - hidden
+
+    class _Loaded(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = encoder
+            mlp_input = hidden + numeric_dim
+            self.head = torch.nn.Sequential(
+                torch.nn.Linear(mlp_input, hidden),
+                torch.nn.GELU(),
+                torch.nn.Linear(hidden, 1),
+            )
+            self.head.load_state_dict(head_sd)
+
+        def forward(
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            numeric_features: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+            pooled = outputs.last_hidden_state[:, 0]
+            if numeric_features is not None:
+                pooled = torch.cat([pooled, numeric_features], dim=-1)
+            return self.head(pooled).squeeze(-1)
+
+    return _Loaded(), AutoTokenizer.from_pretrained(path)
 
 
 def encode_pair_text(

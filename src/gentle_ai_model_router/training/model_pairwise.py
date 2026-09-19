@@ -22,7 +22,7 @@ __all__ = ["build_pairwise_model", "collate_pairs", "pairwise_loss"]
 
 
 def build_pairwise_model(
-    model_name: str = "microsoft/deberta-v3-base",
+    model_name: str = "answerdotai/ModernBERT-base",
     numeric_dim: int = 0,
     tiny_config: Any = None,
 ) -> torch.nn.Module:

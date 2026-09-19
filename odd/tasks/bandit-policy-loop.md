@@ -73,9 +73,9 @@ Commit per work unit on a feature branch.
 - [x] **T4** — Server + CLI integration ✅ 939d62b (6 CLI tests; route fails closed
   to prior ranking on telemetry errors; `router bandit report/update`,
   `router feedback`)
-- [ ] **T5** — Dataset bridge: `dataset/builder.py` reads shim executions and emits
-  `label_provenance=PROVENANCE_TELEMETRY` examples (schema version bump if actual
-  cost/tokens/latency fields are added).
+- [x] **T5** — Dataset bridge ✅ bd25615 + 928f382 (11 tests; PROVENANCE_TELEMETRY
+  examples, actual token labels, schema v2 gated on emitted telemetry rows,
+  v1 backward-load test; verified by independent verifier after high-risk assess)
 - [x] **T6** — Pi adapter ✅ 427f48c (31 tests; models.json chain, object-form
   writes, atomic+backup+rollback, `router integrate pi`)
 - [x] **T7** — Codex adapter ✅ ee2b534 (50 tests; state-file route, underscore
@@ -97,3 +97,8 @@ Commit per work unit on a feature branch.
 
 - 2026-09-19 — T7 done in ee2b534 (Codex adapter). Suite 348 passed; assess
   medium; spot check 50/50. Next: T5 dataset bridge.
+- 2026-09-19 — T5 done in bd25615; assess high → independent verifier found
+  no blockers, 1 moderate (version string stamped on v1-only manifests) fixed
+  inline in 928f382 + v1 backward-load test added. Suite 359 passed; 1
+  pre-existing failure (test_fresh_cache_short_circuits, httpx MockTransport
+  API drift, fails on base too). Branch pushed to origin. Next: T8 docs.

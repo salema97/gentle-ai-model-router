@@ -1,6 +1,6 @@
 Phase,BaselineModel,BaselineEffort,RouterModel,RouterEffort,TokensBaseline,TokensRouter,QualBaseline,QualRouter,QualFloor,TimeBaseline,TimeRouter,TokenSavingsPct,TimeSavingsPct
 explore,Claude Fable 5.1,high,Google Gemini 3.8 Flash,low,15700,5200,88.5,89.5,80.0,24.5,6.2,66.87898089171973,74.69387755102042
-propose,Claude Fable 5.1,high,Meta Llama 4 Maverick,medium,18300,7500,88.0,89.0,80.0,31.0,12.8,59.01639344262295,58.70967741935483
+propose,Claude Fable 5.1,high,Meta Muse Spark 1.3,medium,18300,7400,88.0,89.2,80.0,31.0,11.8,59.56284153005464,61.935483870967744
 spec,Claude Fable 5.1,high,GLM-5.3,medium,22000,9600,91.0,92.0,85.0,38.6,15.8,56.36363636363636,59.067357512953365
 design,Claude Fable 5.1,high,Claude Fable 5.1 (Thinking),high,28300,16500,94.0,95.5,85.0,52.0,31.5,41.69611307420495,39.42307692307692
 tasks,Claude Fable 5.1,high,Kimi K3,low,16900,6100,89.0,90.0,85.0,28.3,9.8,63.905325443786985,65.37102473498233

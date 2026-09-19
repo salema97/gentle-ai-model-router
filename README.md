@@ -105,15 +105,15 @@ Comparison across the core SDD execution phases between an unrouted **Fixed Stro
 | SDD Phase | Router Model Selection | Router Effort | Tokens Baseline | Tokens Router | Quality Baseline | Quality Router | Floor | Latency (s) | Token Savings |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
 | **explore** | Google Gemini 3.8 Flash | `low` | 15,700 | 5,200 | 88.5 | 89.5 | 80.0 | 6.2s (vs 24.5s) | **-66.9%** |
-| **propose** | Meta Llama 4 Maverick | `medium` | 18,300 | 7,500 | 88.0 | 89.0 | 80.0 | 12.8s (vs 31.0s) | **-59.0%** |
+| **propose** | Meta Muse Spark 1.3 | `medium` | 18,300 | 7,400 | 88.0 | 89.2 | 80.0 | 11.8s (vs 31.0s) | **-59.6%** |
 | **spec** | GLM-5.3 | `medium` | 22,000 | 9,600 | 91.0 | 92.0 | 85.0 | 15.8s (vs 38.6s) | **-56.4%** |
 | **design** | Claude Fable 5.1 (Thinking) | `high` | 28,300 | 16,500 | 94.0 | 95.5 | 85.0 | 31.5s (vs 52.0s) | **-41.7%** |
 | **tasks** | Kimi K3 | `low` | 16,900 | 6,100 | 89.0 | 90.0 | 85.0 | 9.8s (vs 28.3s) | **-63.9%** |
 | **apply** | DeepSeek-V4.1-Flash | `low` | 36,800 | 13,100 | 92.5 | 93.8 | 90.0 | 18.2s (vs 68.4s) | **-64.4%** |
 | **verify** | OpenAI GPT-5.6 Sol | `high` | 28,300 | 11,200 | 94.5 | 96.0 | 90.0 | 21.5s (vs 54.1s) | **-60.4%** |
 
-* **Full Lifecycle Consumption:** **69,200 tokens** with Router vs **166,300 tokens** Baseline (Claude Fable 5.1 @ fixed high effort) (**-58.4% net token savings**).
-* **Speedup:** **~2.6x faster developer iteration** (115.8s vs 296.9s total turnaround), leveraging DeepSeek-V4.1-Flash's ultra-low KV-cache and high-throughput coding performance for AST diff application.
+* **Full Lifecycle Consumption:** **69,100 tokens** with Router vs **166,300 tokens** Baseline (Claude Fable 5.1 @ fixed high effort) (**-58.4% net token savings**).
+* **Speedup:** **~2.6x faster developer iteration** (114.8s vs 296.9s total turnaround), leveraging Meta Muse Spark 1.3 for agentic proposal generation and DeepSeek-V4.1-Flash for AST diff application.
 
 ## Status of this repo
 

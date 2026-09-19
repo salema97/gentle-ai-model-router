@@ -31,10 +31,12 @@ from gentle_ai_model_router.registry.normalize import (
     Effort,
     NormalizedAAModel,
     NormalizedArenaRecord,
+    NormalizedBenchmarkSample,
     NormalizedTelemetryRecord,
     internal_effort,
     normalize_aa_models,
     normalize_arena_records,
+    normalize_routing_benchmarks,
     normalize_telemetry_records,
 )
 
@@ -515,6 +517,96 @@ def apply_telemetry_snapshot(session: Session, snapshot_doc: dict[str, Any]) -> 
     )
     logger.info(
         "apply_snapshot source=gentle-telemetry snapshot_id=%s counts=%s",
+        snapshot_id,
+        counts,
+    )
+    return counts
+
+
+def apply_routing_benchmarks_snapshot(
+    session: Session, snapshot_doc: dict[str, Any]
+) -> dict[str, int]:
+    """Apply one empirical routing benchmarks snapshot document to the registry."""
+    snapshot_id = str(snapshot_doc.get("snapshot_id") or "unknown")
+    payload = snapshot_doc.get("data") if "data" in snapshot_doc else snapshot_doc
+    samples: list[NormalizedBenchmarkSample] = normalize_routing_benchmarks(payload)
+
+    # Group samples by (canonical_id, mapped_phase) and track unique models
+    groups: dict[tuple[str, str], list[NormalizedBenchmarkSample]] = {}
+    unique_models: dict[str, tuple[str | None, str]] = {}
+
+    for s in samples:
+        cid = s.canonical_id
+        if cid not in unique_models:
+            if "/" in cid:
+                org, _, name = cid.partition("/")
+            else:
+                org, name = None, cid
+            unique_models[cid] = (org, name)
+
+        key = (cid, s.mapped_phase)
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(s)
+
+    model_entities: dict[str, Model] = {}
+    for cid, (org, name) in unique_models.items():
+        m = upsert_model(session, canonical_id=cid, org=org, name=name)
+        provider = get_or_create_provider(session, org or "unknown")
+        get_or_create_deployment(session, m, provider, "default")
+        model_entities[cid] = m
+
+    benchmark_count = 0
+    for (cid, mapped_phase), group in groups.items():
+        model = model_entities[cid]
+
+        # 1. Aggregate average quality per (model, mapped_phase)
+        avg_quality = sum(s.quality for s in group) / len(group)
+        upsert_benchmark(
+            session,
+            model,
+            benchmark="empirical_quality",
+            score=avg_quality,
+            category=mapped_phase,
+            source_snapshot_id=snapshot_id,
+        )
+        benchmark_count += 1
+
+        # 2. If latency > 0, aggregate average latency and upsert empirical_latency
+        positive_latencies = [s.latency for s in group if s.latency > 0]
+        if positive_latencies:
+            avg_latency = sum(positive_latencies) / len(positive_latencies)
+            upsert_benchmark(
+                session,
+                model,
+                benchmark="empirical_latency",
+                score=avg_latency,
+                category=mapped_phase,
+                source_snapshot_id=snapshot_id,
+            )
+            benchmark_count += 1
+
+    counts = {"models": len(unique_models), "benchmarks": benchmark_count}
+
+    raw_fetched = snapshot_doc.get("fetched_at")
+    if isinstance(raw_fetched, datetime):
+        fetched_at = raw_fetched
+    elif raw_fetched:
+        fetched_at = datetime.fromisoformat(str(raw_fetched))
+    else:
+        fetched_at = datetime.now(tz=UTC)
+
+    meta = snapshot_doc.get("meta") or {}
+    record_snapshot(
+        session,
+        source="routing-benchmarks",
+        snapshot_id=snapshot_id,
+        fetched_at=_to_utc(fetched_at),
+        record_count=int(meta.get("record_count") or len(samples)),
+        raw_path="",
+    )
+    logger.info(
+        "apply_snapshot source=routing-benchmarks snapshot_id=%s counts=%s",
         snapshot_id,
         counts,
     )

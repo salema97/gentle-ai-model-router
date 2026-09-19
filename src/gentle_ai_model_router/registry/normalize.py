@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from gentle_ai_model_router.collector.routing_benchmarks import map_task_to_phase
+
 
 class Effort(StrEnum):
     """Internal reasoning-effort taxonomy (superset across runtimes)."""
@@ -141,6 +143,21 @@ class NormalizedTelemetryRecord:
     tokens_per_response: float
     tokens_per_success: float
     error_categories: str = ""
+
+
+@dataclass
+class NormalizedBenchmarkSample:
+    """One empirical routing benchmark sample, normalized to registry shape."""
+
+    canonical_id: str
+    task_name: str
+    mapped_phase: str
+    quality: float
+    latency: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost: float = 0.0
+    provenance: str = ""
 
 
 def _first(mapping: dict[str, Any], *keys: str) -> Any:
@@ -530,4 +547,291 @@ def normalize_telemetry_records(payload: Any) -> list[NormalizedTelemetryRecord]
                 error_categories=error_categories,
             )
         )
+    return out
+
+
+_KNOWN_MODEL_PREFIX_TO_ORG: dict[str, str] = {
+    "gpt-": "openai",
+    "text-": "openai",
+    "o1-": "openai",
+    "o3-": "openai",
+    "claude-": "anthropic",
+    "gemini-": "google",
+    "gemma-": "google",
+    "llama-": "meta",
+    "mistral-": "mistralai",
+    "mixtral-": "mistralai",
+    "qwen": "qwen",
+    "deepseek-": "deepseek",
+}
+
+
+def canonicalize_model_id(raw_model: str) -> str:
+    """Clean and canonicalize a model identifier into an org/model string."""
+    raw = str(raw_model).strip()
+    if not raw:
+        return "unknown/unknown"
+
+    # Handle HuggingFace style org--model if no slash is present
+    if "--" in raw and "/" not in raw:
+        org, _, name = raw.partition("--")
+        org, name = org.strip(), name.strip()
+    elif "/" in raw:
+        # Standardize multiple or leading/trailing slashes
+        parts = [p.strip() for p in raw.split("/") if p.strip()]
+        if len(parts) >= 2:
+            org = parts[0]
+            name = "/".join(parts[1:])
+        elif len(parts) == 1:
+            org = "unknown"
+            name = parts[0]
+        else:
+            return "unknown/unknown"
+    else:
+        org = "unknown"
+        name = raw
+
+    lowered_org = org.lower()
+    lowered_name = name.lower()
+
+    if lowered_org in _PLACEHOLDERS:
+        org = "unknown"
+    if lowered_name in _PLACEHOLDERS:
+        name = "unknown"
+
+    # Infer known org if org is unknown
+    if org == "unknown":
+        for prefix, known_org in _KNOWN_MODEL_PREFIX_TO_ORG.items():
+            if lowered_name.startswith(prefix):
+                org = known_org
+                break
+
+    return f"{org}/{name}"
+
+
+def normalize_routing_benchmarks(payload: Any) -> list[NormalizedBenchmarkSample]:
+    """Normalize empirical routing benchmark payload into NormalizedBenchmarkSample list."""
+    if isinstance(payload, list):
+        if all(isinstance(x, NormalizedBenchmarkSample) for x in payload):
+            return payload
+        raw_list = [r for r in payload if isinstance(r, dict)]
+        data: dict[str, Any] = {"samples": raw_list}
+    elif isinstance(payload, dict):
+        if "data" in payload and isinstance(payload["data"], dict):
+            data = payload["data"]
+        else:
+            data = payload
+    else:
+        return []
+
+    out: list[NormalizedBenchmarkSample] = []
+
+    # 1. DARS
+    dars_records = data.get("dars") if isinstance(data, dict) else []
+    if isinstance(dars_records, list):
+        for rec in dars_records:
+            if not isinstance(rec, dict):
+                continue
+            raw_model = _first(rec, "model", "model_name")
+            if not raw_model:
+                continue
+            canonical_id = canonicalize_model_id(str(raw_model))
+            task_name = str(rec.get("task_name") or rec.get("task") or "drop-800")
+            mapped_phase = str(rec.get("mapped_phase") or map_task_to_phase(task_name))
+            score = (
+                rec.get("quality")
+                if rec.get("quality") is not None
+                else rec.get("score")
+            )
+            quality = _as_float(score) or 0.0
+            resp_time = (
+                rec.get("latency")
+                if rec.get("latency") is not None
+                else rec.get("response_time")
+            )
+            latency = _as_float(resp_time) or 0.0
+            in_tok = (
+                rec.get("prompt_tokens")
+                if rec.get("prompt_tokens") is not None
+                else rec.get("input_tokens")
+            )
+            input_tokens = _as_int(in_tok) or 0
+            out_tok = (
+                rec.get("completion_tokens")
+                if rec.get("completion_tokens") is not None
+                else rec.get("output_tokens")
+            )
+            output_tokens = _as_int(out_tok) or 0
+            cost = _as_float(rec.get("cost")) or 0.0
+            provenance = str(rec.get("provenance") or "dars")
+
+            out.append(
+                NormalizedBenchmarkSample(
+                    canonical_id=canonical_id,
+                    task_name=task_name,
+                    mapped_phase=mapped_phase,
+                    quality=quality,
+                    latency=latency,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost=cost,
+                    provenance=provenance,
+                )
+            )
+
+    # 2. xRouteBench
+    xrb_records = data.get("xroutebench") if isinstance(data, dict) else []
+    if isinstance(xrb_records, list):
+        for rec in xrb_records:
+            if not isinstance(rec, dict):
+                continue
+            raw_model = _first(rec, "model_name", "model")
+            if not raw_model:
+                continue
+            canonical_id = canonicalize_model_id(str(raw_model))
+            task_name = str(rec.get("task_name") or rec.get("task") or "")
+            mapped_phase = str(rec.get("mapped_phase") or map_task_to_phase(task_name))
+            perf = (
+                rec.get("performance")
+                if rec.get("performance") is not None
+                else rec.get("score")
+            )
+            quality = _as_float(perf) or 0.0
+            resp_time = (
+                rec.get("response_time")
+                if rec.get("response_time") is not None
+                else rec.get("latency")
+            )
+            latency = _as_float(resp_time) or 0.0
+            in_tok = (
+                rec.get("input_tokens")
+                if rec.get("input_tokens") is not None
+                else rec.get("prompt_tokens")
+            )
+            input_tokens = _as_int(in_tok) or 0
+            out_tok = (
+                rec.get("output_tokens")
+                if rec.get("output_tokens") is not None
+                else rec.get("completion_tokens")
+            )
+            output_tokens = _as_int(out_tok) or 0
+            cost = _as_float(rec.get("cost")) or 0.0
+            provenance = str(rec.get("provenance") or "xroutebench")
+
+            out.append(
+                NormalizedBenchmarkSample(
+                    canonical_id=canonical_id,
+                    task_name=task_name,
+                    mapped_phase=mapped_phase,
+                    quality=quality,
+                    latency=latency,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost=cost,
+                    provenance=provenance,
+                )
+            )
+
+    # 3. Compendium
+    comp_records = data.get("compendium") if isinstance(data, dict) else []
+    if isinstance(comp_records, list):
+        for rec in comp_records:
+            if not isinstance(rec, dict):
+                continue
+            task_name = str(
+                rec.get("dataset") or rec.get("task_name") or rec.get("task") or ""
+            )
+            mapped_phase = str(rec.get("mapped_phase") or map_task_to_phase(task_name))
+            raw_models = rec.get("models_name") or rec.get("models") or []
+            raw_perf = rec.get("models_performance") or rec.get("performance") or []
+            if not isinstance(raw_models, (list, tuple)):
+                raw_models = [raw_models]
+            if not isinstance(raw_perf, (list, tuple)):
+                raw_perf = [raw_perf]
+
+            for raw_model, perf in zip(raw_models, raw_perf, strict=False):
+                if not raw_model:
+                    continue
+                canonical_id = canonicalize_model_id(str(raw_model))
+                quality = _as_float(perf) or 0.0
+                resp_time = (
+                    rec.get("latency")
+                    if rec.get("latency") is not None
+                    else rec.get("response_time")
+                )
+                latency = _as_float(resp_time) or 0.0
+                input_tokens = _as_int(rec.get("input_tokens")) or 0
+                output_tokens = _as_int(rec.get("output_tokens")) or 0
+                cost = _as_float(rec.get("cost")) or 0.0
+                provenance = str(rec.get("provenance") or "compendium")
+
+                out.append(
+                    NormalizedBenchmarkSample(
+                        canonical_id=canonical_id,
+                        task_name=task_name,
+                        mapped_phase=mapped_phase,
+                        quality=quality,
+                        latency=latency,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cost=cost,
+                        provenance=provenance,
+                    )
+                )
+
+    # 4. Fallback: direct "samples" list if provided
+    samples_records = data.get("samples") if isinstance(data, dict) else []
+    if isinstance(samples_records, list):
+        for rec in samples_records:
+            if not isinstance(rec, dict):
+                continue
+            raw_model = _first(rec, "model", "model_name", "canonical_id")
+            if not raw_model:
+                continue
+            canonical_id = canonicalize_model_id(str(raw_model))
+            task_name = str(
+                rec.get("task_name") or rec.get("task") or rec.get("dataset") or ""
+            )
+            mapped_phase = str(rec.get("mapped_phase") or map_task_to_phase(task_name))
+            perf = rec.get("quality") if rec.get("quality") is not None else (
+                rec.get("performance")
+                if rec.get("performance") is not None
+                else rec.get("score")
+            )
+            quality = _as_float(perf) or 0.0
+            resp_time = (
+                rec.get("latency")
+                if rec.get("latency") is not None
+                else rec.get("response_time")
+            )
+            latency = _as_float(resp_time) or 0.0
+            in_tok = (
+                rec.get("input_tokens")
+                if rec.get("input_tokens") is not None
+                else rec.get("prompt_tokens")
+            )
+            input_tokens = _as_int(in_tok) or 0
+            out_tok = (
+                rec.get("output_tokens")
+                if rec.get("output_tokens") is not None
+                else rec.get("completion_tokens")
+            )
+            output_tokens = _as_int(out_tok) or 0
+            cost = _as_float(rec.get("cost")) or 0.0
+            provenance = str(rec.get("provenance") or "")
+
+            out.append(
+                NormalizedBenchmarkSample(
+                    canonical_id=canonical_id,
+                    task_name=task_name,
+                    mapped_phase=mapped_phase,
+                    quality=quality,
+                    latency=latency,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost=cost,
+                    provenance=provenance,
+                )
+            )
+
     return out

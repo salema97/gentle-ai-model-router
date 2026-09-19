@@ -71,6 +71,17 @@ class GentleTelemetryConfig(BaseModel):
     timeout_seconds: float = 30.0
 
 
+class RoutingBenchmarksConfig(BaseModel):
+    """Routing benchmarks dataset settings (DARS, xRouteBench, RoutingCompendium)."""
+
+    enabled: bool = True
+    dars_dataset: str = "AIGNLAI/DARS"
+    xroutebench_dataset: str = "ulab-ai/xRouteBench"
+    compendium_dataset: str = "Wikit/RoutingCompendium-perf"
+    max_samples_per_source: int = 500
+    timeout_seconds: float = 30.0
+
+
 class DataSourcesConfig(BaseModel):
     artificial_analysis: ArtificialAnalysisConfig = Field(
         default_factory=ArtificialAnalysisConfig
@@ -79,6 +90,9 @@ class DataSourcesConfig(BaseModel):
     local_discovery: LocalDiscoveryConfig = Field(default_factory=LocalDiscoveryConfig)
     gentle_telemetry: GentleTelemetryConfig = Field(
         default_factory=GentleTelemetryConfig
+    )
+    routing_benchmarks: RoutingBenchmarksConfig = Field(
+        default_factory=RoutingBenchmarksConfig
     )
 
 

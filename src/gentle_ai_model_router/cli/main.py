@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import json
 import sys
+from contextlib import nullcontext as _nullcontext
 from pathlib import Path
+from typing import Annotated
 
 import httpx
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from gentle_ai_model_router.collector.arena import LMArenaCollector
@@ -166,10 +169,12 @@ def collect(
 def normalize(
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
-    source: str = typer.Option("all", "--source", help="Snapshots to apply: aa | arena | all."),
+    source: str = typer.Option(
+        "all", "--source", help="Snapshots to apply: aa | arena | local | all."
+    ),
 ) -> None:
     """Load latest snapshots and upsert them into the registry."""
-    valid = {"aa", "arena", "all"}
+    valid = {"aa", "arena", "local", "all"}
     if source not in valid:
         err_console.print(f"[red]error: unknown source '{source}'[/red]")
         raise typer.Exit(code=2)
@@ -195,6 +200,9 @@ def normalize(
                 err_console.print("[yellow]warning: no lmarena snapshot to normalize[/yellow]")
             else:
                 applied["lmarena"] = registry_db.apply_arena_snapshot(session, doc)
+        if source in {"local", "all"}:
+            local_result = collect_local_candidates(config.data_sources.local_discovery)
+            applied["local"] = registry_db.apply_local_candidates(session, local_result.candidates)
         session.commit()
 
     table = Table(title="normalize results")
@@ -422,6 +430,202 @@ def shim_ingest(
     with store.session() as session:
         counts = store.ingest_jsonl(session, sys.stdin)
     console.print(json.dumps(counts))
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: dataset builder + DeBERTa ranker + offline evaluation + escalation
+# --------------------------------------------------------------------------- #
+
+
+@app.command()
+def build_dataset(
+    name: str = typer.Option(..., "--name", help="Dataset name."),
+    train_end: str = typer.Option(
+        ..., "--train-end", help="Train cutoff (ISO date); earlier = train."
+    ),
+    val_end: str | None = typer.Option(
+        None, "--val-end", help="Validation cutoff (ISO date); earlier = validation."
+    ),
+    as_of: str | None = typer.Option(
+        None, "--as-of", help="Knowledge cutoff (ISO date); newer rows = build error."
+    ),
+    pair_margin: float | None = typer.Option(
+        None, "--pair-margin", help="Pairwise margin threshold (default 0.05)."
+    ),
+    max_pairs: int = typer.Option(50, "--max-pairs", help="Cap pairs per group."),
+    phase: Annotated[
+        list[str] | None,
+        typer.Option("--phase", help="Phase to include (repeatable). Default: all."),
+    ] = None,
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Build a DatasetV1 from registry priors (labels are bootstrap priors!)."""
+    from datetime import date
+
+    from gentle_ai_model_router.dataset.builder import (
+        DatasetBuilderConfig,
+        DatasetBuildError,
+        build_examples,
+        write_dataset,
+    )
+
+    config, _ = _load_ctx(config_path, data_dir)
+    builder_kwargs: dict = {
+        "name": name,
+        "train_end": date.fromisoformat(train_end),
+        "val_end": date.fromisoformat(val_end) if val_end else None,
+        "as_of": date.fromisoformat(as_of) if as_of else None,
+        "max_pairs_per_group": max_pairs,
+        "phases": phase or list(CANONICAL_PHASES),
+    }
+    if pair_margin is not None:
+        builder_kwargs["pair_margin"] = pair_margin
+    try:
+        builder = DatasetBuilderConfig(**builder_kwargs)
+    except ValueError as exc:
+        err_console.print(f"[red]error: invalid date: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    engine, _effective = registry_db.get_engine_with_fallback(
+        config.database_url, config.sqlite_fallback_url
+    )
+    registry_db.init_schema(engine)
+    try:
+        with registry_db.Session(engine) as session:
+            dataset = build_examples(session, config, builder)
+            out_dir = write_dataset(dataset, config.data_dir)
+    except DatasetBuildError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    table = Table(title=f"dataset {dataset.name} v{dataset.version}")
+    table.add_row("path", str(out_dir))
+    table.add_row("examples", str(manifest["example_count"]))
+    table.add_row("pairs", str(manifest["pair_count"]))
+    table.add_row("split_counts", json.dumps(manifest["split_counts"]))
+    table.add_row("pair_split_counts", json.dumps(manifest["pair_split_counts"]))
+    console.print(table)
+    err_console.print("[yellow]WARNING: labels are bootstrap priors, not ground truth —[/yellow]")
+    err_console.print("[yellow]see manifest.json label_provenance_statement.[/yellow]")
+
+
+@app.command()
+def train(
+    dataset_path: str = typer.Option(..., "--dataset", help="Dataset version directory."),
+    objective: str | None = typer.Option(None, "--objective", help="pointwise | pairwise."),
+    model_name: str | None = typer.Option(
+        None, "--model-name", help="HF model (default deberta-v3-base)."
+    ),
+    output_dir: str | None = typer.Option(None, "--output-dir", help="Checkpoint root."),
+    epochs: float | None = typer.Option(None, "--epochs"),
+    batch_size: int | None = typer.Option(None, "--batch-size"),
+    seed: int | None = typer.Option(None, "--seed"),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Train the DeBERTa ranker (requires: pip install .[train])."""
+    from gentle_ai_model_router.training.train import train as run_training
+
+    config, _ = _load_ctx(config_path, data_dir)
+    overrides: dict = {}
+    for key, value in (
+        ("objective", objective),
+        ("model_name", model_name),
+        ("output_dir", output_dir),
+        ("epochs", epochs),
+        ("batch_size", batch_size),
+        ("seed", seed),
+    ):
+        if value is not None:
+            overrides[key] = value
+    training_cfg = config.training.model_copy(update=overrides)
+    if training_cfg.objective not in {"pointwise", "pairwise"}:
+        err_console.print(
+            f"[red]error: unknown objective '{training_cfg.objective}' "
+            "(expected pointwise | pairwise)[/red]"
+        )
+        raise typer.Exit(code=2)
+    try:
+        out_dir = run_training(config, training_cfg, dataset_path)
+    except (RuntimeError, ValueError) as exc:
+        err_console.print(f"[red]error: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=2) from exc
+    metrics = json.loads((out_dir / "metrics.json").read_text())
+    table = Table(title=f"checkpoint {out_dir}")
+    table.add_row("objective", metrics["objective"])
+    table.add_row("train_rows", str(metrics["train_rows"]))
+    table.add_row("train_loss", f"{metrics['train_loss']:.6f}")
+    table.add_row("label_provenance", metrics["label_provenance"])
+    console.print(table)
+    err_console.print(
+        "[yellow]WARNING: trained on bootstrap PRIOR labels — not ground truth.[/yellow]"
+    )
+
+
+@app.command()
+def evaluate(
+    dataset_path: str = typer.Option(..., "--dataset", help="Dataset version directory."),
+    checkpoint: str | None = typer.Option(None, "--checkpoint", help="Ranker checkpoint dir."),
+    baselines_only: bool = typer.Option(
+        False, "--evaluate-baselines-only", help="No checkpoint; reference routers only."
+    ),
+    output: str | None = typer.Option(None, "--output", help="Write metrics.json here."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Offline evaluation: ranking + business metrics per split."""
+    from gentle_ai_model_router.training.evaluate import evaluate_dataset
+
+    config, _ = _load_ctx(config_path, data_dir)
+    engine = None
+    if not baselines_only:
+        # The baseline-policy reference needs the registry even when a
+        # checkpoint is evaluated.
+        engine, _eff = registry_db.get_engine_with_fallback(
+            config.database_url, config.sqlite_fallback_url
+        )
+        registry_db.init_schema(engine)
+    try:
+        session_ctx = registry_db.Session(engine) if engine is not None else _nullcontext()
+        with session_ctx as session:
+            results = evaluate_dataset(
+                dataset_path,
+                config,
+                session=session,
+                checkpoint=None if baselines_only else checkpoint,
+                output_path=output,
+            )
+    except (RuntimeError, ValueError) as exc:
+        err_console.print(f"[red]error: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    for split, routers in results["splits"].items():
+        table = Table(title=f"split: {split}")
+        table.add_column("router")
+        for key in ("top1_accuracy", "top3_recall", "mrr", "ndcg@3", "ndcg@5",
+                    "tokens_per_task", "tokens_per_success", "success_rate",
+                    "routing_regret"):
+            table.add_column(key, justify="right")
+        for router, metrics in routers.items():
+            table.add_row(
+                router,
+                f"{metrics['top1_accuracy']:.3f}",
+                f"{metrics['top3_recall']:.3f}",
+                f"{metrics['mrr']:.3f}",
+                f"{metrics['ndcg@3']:.3f}",
+                f"{metrics['ndcg@5']:.3f}",
+                f"{metrics['tokens_per_task']:.0f}",
+                f"{metrics['tokens_per_success']:.0f}",
+                f"{metrics['success_rate']:.3f}",
+                f"{metrics['routing_regret']:.4f}",
+            )
+        console.print(table)
+    err_console.print(
+        "[yellow]Caveat: labels are bootstrap priors — compare routers relative to"
+        " each other only.[/yellow]"
+    )
 
 
 if __name__ == "__main__":

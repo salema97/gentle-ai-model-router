@@ -42,7 +42,7 @@ from gentle_ai_model_router.registry.models import (
     Provider,
 )
 from gentle_ai_model_router.registry.normalize import Effort
-from gentle_ai_model_router.router.config import PhaseConfig, RouterConfig
+from gentle_ai_model_router.router.config import PhaseConfig, PolicyConfig, RouterConfig
 from gentle_ai_model_router.router.decision import (
     CANONICAL_PHASES,
     Alternative,
@@ -53,6 +53,17 @@ from gentle_ai_model_router.router.decision import (
 logger = logging.getLogger(__name__)
 
 EFFORT_RANK: dict[str, int] = {level.value: idx for idx, level in enumerate(Effort)}
+
+
+def effort_quality(prior: float, effort: str, policy: PolicyConfig) -> float:
+    """Quality estimate for (benchmark prior, effort) — THE shared quality model.
+
+    Used by the deterministic policy AND by the dataset builder's bootstrap
+    utility labels, so training labels and the baseline ranker can never drift
+    apart: quality = prior + (ceiling - prior) * gain[effort].
+    """
+    gain = policy.effort_quality_gain.get(effort, 0.0)
+    return prior + (policy.effort_ceiling - prior) * gain
 
 # Hard capability requirements per phase. spec/design *prefer* structured
 # output (weighted bonus, not a hard filter) — only apply/verify hard-require
@@ -164,6 +175,28 @@ def _latest_price(session: Session, deployment_id: int) -> ModelPrice | None:
     ).scalars().first()
 
 
+# Public wrappers — the dataset builder reuses the SAME prior/quality/cost
+# model so bootstrap labels cannot drift from the baseline policy.
+def benchmark_priors(
+    session: Session, models: list[Model], weights: dict[str, float], flat_prior: float
+) -> tuple[dict[int, float], set[int]]:
+    """Public alias of the weighted min-max benchmark prior computation."""
+    return _benchmark_priors(session, models, weights, flat_prior)
+
+
+def latest_price(session: Session, deployment_id: int) -> ModelPrice | None:
+    """Public alias of the latest-price lookup."""
+    return _latest_price(session, deployment_id)
+
+
+def estimate_cost(
+    policy: PolicyConfig, input_price: float, output_price: float, tokens: float
+) -> float:
+    """Cost in USD: blended price per token × token count (1M-token units)."""
+    blended = (1 - policy.output_fraction) * input_price + policy.output_fraction * output_price
+    return tokens * blended / 1_000_000
+
+
 def _passes_hard_filters(
     model: Model, phase: str, context_tokens: int | None, reason_codes: list[str]
 ) -> bool:
@@ -237,8 +270,7 @@ def select_candidate(
 
         chosen: _Candidate | None = None
         for _, _, _, variant in variants:
-            gain = policy.effort_quality_gain.get(variant.effort, 0.0)
-            quality = prior + (policy.effort_ceiling - prior) * gain
+            quality = effort_quality(prior, variant.effort, policy)
             if quality >= threshold:
                 multiplier = policy.effort_token_multiplier.get(variant.effort, 1.0)
                 base = max(policy.base_tokens, context.context_tokens or 0)
@@ -261,10 +293,7 @@ def select_candidate(
                 else:
                     in_p, out_p = policy.default_input_price, policy.default_output_price
                     local_reasons.append("missing_price_data:using_default")
-                blended = (
-                    (1 - policy.output_fraction) * in_p + policy.output_fraction * out_p
-                )
-                estimated_cost = estimated_tokens * blended / 1_000_000
+                estimated_cost = estimate_cost(policy, in_p, out_p, estimated_tokens)
                 if speed_rows and model.id in speed_rows:
                     top = max(speed_rows.values())
                     latency_penalty = (top - speed_rows[model.id]) / top if top else 0.0

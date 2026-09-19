@@ -7,6 +7,7 @@ the snapshot id it came from — provenance is mandatory.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,13 +28,66 @@ from gentle_ai_model_router.registry.models import (
     Provider,
 )
 from gentle_ai_model_router.registry.normalize import (
+    Effort,
     NormalizedAAModel,
     NormalizedArenaRecord,
+    internal_effort,
     normalize_aa_models,
     normalize_arena_records,
 )
 
 logger = get_logger(__name__)
+
+
+def _map_raw_effort(raw: str) -> Effort | None:
+    """Map a provider-native variant string from discovery to the internal taxonomy.
+
+    OpenCode speaks the internal vocabulary directly; ``none`` (seen in real
+    variants caches) maps to OFF. Unknown values return None (skipped, counted).
+    """
+    effort = internal_effort("opencode", raw)
+    if effort is not None:
+        return effort
+    if raw == "none":
+        return Effort.OFF
+    try:
+        return Effort(raw)
+    except ValueError:
+        return None
+
+
+def apply_local_candidates(session: Session, candidates: Iterable[Any]) -> dict[str, int]:
+    """Upsert locally discovered (model, provider, efforts) into the registry.
+
+    Candidates are duck-typed (``model``, ``provider``, ``efforts`` attributes)
+    to avoid a collector dependency. Each (model, provider) becomes a
+    deployment with one variant row per mapped effort level. Idempotent.
+    """
+    counts = {"providers": 0, "models": 0, "deployments": 0, "variants": 0, "skipped": 0}
+    seen_providers: set[int] = set()
+    seen_models: set[int] = set()
+    seen_deployments: set[int] = set()
+    for cand in candidates:
+        if not getattr(cand, "model", None) or not getattr(cand, "provider", None):
+            counts["skipped"] += 1
+            continue
+        provider = get_or_create_provider(session, str(cand.provider))
+        model = upsert_model(session, canonical_id=str(cand.model))
+        deployment = get_or_create_deployment(session, model, provider, None)
+        seen_providers.add(provider.id)
+        seen_models.add(model.id)
+        seen_deployments.add(deployment.id)
+        for raw in getattr(cand, "efforts", None) or []:
+            internal = _map_raw_effort(str(raw))
+            if internal is None:
+                counts["skipped"] += 1
+                continue
+            upsert_variant(session, deployment, internal.value, str(raw))
+            counts["variants"] += 1
+    counts["providers"] = len(seen_providers)
+    counts["models"] = len(seen_models)
+    counts["deployments"] = len(seen_deployments)
+    return counts
 
 
 def get_engine(database_url: str) -> Engine:

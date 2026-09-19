@@ -174,6 +174,23 @@ class ShimConfig(BaseModel):
     database_filename: str = "telemetry.sqlite"
 
 
+class TrainingConfig(BaseModel):
+    """DeBERTa ranker training settings (docs/training.md).
+
+    Heavy dependencies (torch/transformers) are imported lazily inside
+    training/ — the base install never needs them.
+    """
+
+    model_name: str = "microsoft/deberta-v3-base"
+    objective: str = "pointwise"  # pointwise | pairwise (listwise: future work)
+    output_dir: str = "models/deberta-router"
+    learning_rate: float = 2e-5
+    epochs: float = 2.0
+    batch_size: int = 8
+    max_length: int = 512
+    seed: int = 42
+
+
 class RouterConfig(BaseModel):
     """Top-level router configuration."""
 
@@ -185,6 +202,7 @@ class RouterConfig(BaseModel):
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     integrate: IntegrateConfig = Field(default_factory=IntegrateConfig)
     shim: ShimConfig = Field(default_factory=ShimConfig)
+    training: TrainingConfig = Field(default_factory=TrainingConfig)
     token_weights: dict[str, float] = Field(default_factory=dict)
     api: ApiConfig = Field(default_factory=ApiConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

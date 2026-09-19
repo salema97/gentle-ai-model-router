@@ -167,3 +167,44 @@ def test_variant_upsert(tmp_path):
         session.commit()
         variants = session.query(ModelVariant).all()
         assert len(variants) == 2
+
+
+def test_apply_local_candidates(tmp_path):
+    """Local discovery candidates become deployments with mapped variants."""
+    from gentle_ai_model_router.collector.local_discovery import DiscoveredCandidate
+
+    candidates = [
+        DiscoveredCandidate(
+            model="deepseek/deepseek-v4-flash",
+            provider="tokengo",
+            efforts=["high", "low", "max"],
+        ),
+        DiscoveredCandidate(
+            model="claude-sonnet-4-6",
+            provider="modelis",
+            efforts=["high", "low", "none", "exotic"],
+        ),
+        DiscoveredCandidate(model="no-provider", provider=None, efforts=["low"]),
+    ]
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        counts = registry_db.apply_local_candidates(session, candidates)
+        session.commit()
+        assert counts["providers"] == 2
+        assert counts["models"] == 2
+        assert counts["deployments"] == 2
+        assert counts["skipped"] == 2  # "exotic" + provider-less candidate
+        variants = {
+            (v.effort, v.provider_value)
+            for v in session.query(ModelVariant).join(Deployment).join(Model).all()
+        }
+        assert ("high", "high") in variants
+        assert ("low", "low") in variants
+        assert ("max", "max") in variants
+        assert ("off", "none") in variants  # real-cache "none" -> OFF
+        assert all(v != "exotic" for _, v in variants)
+        # Idempotent: re-applying adds no new rows (counts report attempts).
+        counts2 = registry_db.apply_local_candidates(session, candidates[:1])
+        session.commit()
+        assert counts2["variants"] == 3
+        assert session.query(ModelVariant).count() == 6

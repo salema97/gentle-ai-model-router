@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -149,3 +149,137 @@ def read_telemetry_executions(db_url: str) -> TelemetryReadResult:
         for execution, decision in all_scored
     ]
     return TelemetryReadResult(rows=rows)
+
+
+def extract_ground_truth_executions(
+    snapshot_doc: dict[str, Any], default_phase: str = "apply"
+) -> list[TelemetryExecution]:
+    """Convert ground-truth trace snapshot data into TelemetryExecution records.
+
+    Allows ground-truth traces from RouterBench, RouteLLM, or SWE-Traces to be
+    consumed via the telemetry execution data structure with deterministic execution IDs.
+    """
+    data = (
+        snapshot_doc.get("data")
+        if isinstance(snapshot_doc, dict) and "data" in snapshot_doc
+        else snapshot_doc
+    )
+    if not isinstance(data, dict):
+        return []
+
+    event_date = date.today()
+    fetched_at_str = (
+        snapshot_doc.get("fetched_at") if isinstance(snapshot_doc, dict) else None
+    )
+    if fetched_at_str:
+        try:
+            event_date = datetime.fromisoformat(fetched_at_str).date()
+        except (ValueError, TypeError):
+            pass
+
+    records: list[TelemetryExecution] = []
+    # 1. SWE-traces
+    trajectories = data.get("trajectories")
+    if isinstance(trajectories, list):
+        for idx, item in enumerate(trajectories):
+            if isinstance(item, dict):
+                inst_id = str(item.get("instance_id") or f"swe-{idx}")
+                model = str(item.get("model_name") or item.get("model") or "")
+                phase = str(item.get("mapped_phase") or default_phase)
+                in_tok = int(item.get("input_tokens") or 0)
+                out_tok = int(item.get("output_tokens") or 0)
+                tot_tok = int(item.get("total_tokens") or (in_tok + out_tok))
+                latency = item.get("latency")
+                latency_ms = int(float(latency) * 1000) if latency is not None else None
+                success = 1 if item.get("test_passed") else 0
+                cost = float(item.get("cost") or 0.0)
+                records.append(
+                    TelemetryExecution(
+                        execution_id=f"gt-swe-{inst_id}",
+                        phase=phase,
+                        task_type="swe-bench",
+                        model=model,
+                        deployment=None,
+                        effort=None,
+                        input_tokens=in_tok,
+                        output_tokens=out_tok,
+                        total_tokens=tot_tok,
+                        latency_ms=latency_ms,
+                        task_success=success,
+                        quality_score=float(success),
+                        event_date=event_date,
+                        estimated_tokens=float(tot_tok),
+                        estimated_cost=cost,
+                        repo_features={"repo": item.get("repo", "unknown")},
+                    )
+                )
+
+    # 2. RouterBench & RouteLLM samples
+    samples = data.get("samples")
+    if isinstance(samples, list):
+        source = str(data.get("source") or "")
+        for idx, item in enumerate(samples):
+            if isinstance(item, dict):
+                phase = str(item.get("mapped_phase") or default_phase)
+                task_name = str(item.get("task_name") or "benchmark")
+                latency = item.get("latency")
+                latency_ms = int(float(latency) * 1000) if latency is not None else None
+                cost = float(item.get("cost") or 0.0)
+                in_tok = int(item.get("input_tokens") or 0)
+                out_tok = int(item.get("output_tokens") or 0)
+                tot_tok = in_tok + out_tok
+
+                if source == "routellm" or "model_a" in item:
+                    score_a = float(
+                        item.get("score_a") if item.get("score_a") is not None else 0.5
+                    )
+                    success_a = 1 if item.get("choice_label") in ("model_a", "tie") else 0
+                    records.append(
+                        TelemetryExecution(
+                            execution_id=f"gt-routellm-{idx}-a",
+                            phase=phase,
+                            task_type=task_name,
+                            model=str(item.get("model_a") or ""),
+                            deployment=None,
+                            effort=None,
+                            input_tokens=in_tok,
+                            output_tokens=out_tok,
+                            total_tokens=tot_tok,
+                            latency_ms=latency_ms,
+                            task_success=success_a,
+                            quality_score=score_a,
+                            event_date=event_date,
+                            estimated_tokens=float(tot_tok),
+                            estimated_cost=float(item.get("cost_a") or cost),
+                            repo_features=None,
+                        )
+                    )
+                else:
+                    model = str(item.get("model_name") or item.get("model") or "")
+                    q = float(
+                        item.get("correctness")
+                        if item.get("correctness") is not None
+                        else 0.5
+                    )
+                    records.append(
+                        TelemetryExecution(
+                            execution_id=f"gt-routerbench-{idx}",
+                            phase=phase,
+                            task_type=task_name,
+                            model=model,
+                            deployment=None,
+                            effort=None,
+                            input_tokens=in_tok,
+                            output_tokens=out_tok,
+                            total_tokens=tot_tok,
+                            latency_ms=latency_ms,
+                            task_success=1 if q >= 0.5 else 0,
+                            quality_score=q,
+                            event_date=event_date,
+                            estimated_tokens=float(tot_tok),
+                            estimated_cost=cost,
+                            repo_features=None,
+                        )
+                    )
+
+    return records

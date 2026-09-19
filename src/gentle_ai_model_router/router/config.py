@@ -82,6 +82,39 @@ class RoutingBenchmarksConfig(BaseModel):
     timeout_seconds: float = 30.0
 
 
+class RouterBenchConfig(BaseModel):
+    """RouterBench dataset settings (withmartian/routerbench)."""
+
+    enabled: bool = True
+    dataset: str = "withmartian/routerbench"
+    split: str = "test"
+    url: str | None = None
+    max_samples: int = 500
+    timeout_seconds: float = 30.0
+
+
+class RouteLLMConfig(BaseModel):
+    """RouteLLM dataset settings (lm-sys/RouteLLM)."""
+
+    enabled: bool = True
+    dataset: str = "lmsys/routellm-eval"
+    split: str = "test"
+    url: str | None = None
+    max_samples: int = 500
+    timeout_seconds: float = 30.0
+
+
+class SWETracesConfig(BaseModel):
+    """SWE-Traces & Aider trajectory dataset settings."""
+
+    enabled: bool = True
+    dataset: str = "princeton-nlp/SWE-bench_Lite"
+    split: str = "test"
+    url: str | None = None
+    max_samples: int = 500
+    timeout_seconds: float = 30.0
+
+
 class DataSourcesConfig(BaseModel):
     artificial_analysis: ArtificialAnalysisConfig = Field(
         default_factory=ArtificialAnalysisConfig
@@ -94,6 +127,9 @@ class DataSourcesConfig(BaseModel):
     routing_benchmarks: RoutingBenchmarksConfig = Field(
         default_factory=RoutingBenchmarksConfig
     )
+    routerbench: RouterBenchConfig = Field(default_factory=RouterBenchConfig)
+    routellm: RouteLLMConfig = Field(default_factory=RouteLLMConfig)
+    swe_traces: SWETracesConfig = Field(default_factory=SWETracesConfig)
 
 
 class RegistryConfig(BaseModel):

@@ -98,8 +98,57 @@ latency, success)` from actual Gentle AI usage.
   Telemetry quota discipline: only (phase, candidate, effort, token counts,
   outcome) — no prompts, no diffs (mirrors the repo's scrubbing posture).
 
+## 5. Public Ground-Truth Datasets — EMPIRICAL TRACES
+
+Public ground-truth datasets from the AI/SWE research ecosystem provide empirical execution
+evidence to eliminate reliance on synthetic bootstrap priors and harden the System One calibrated
+decision engine.
+
+### 5.1 RouterBench (`withmartian/routerbench`)
+
+- **Role**: Per-prompt model evaluation ground truth (`source: routerbench`).
+- **Characteristics**: Over 30,000 prompts evaluated across 11+ leading LLMs, capturing exact
+  per-sample cost (USD), latency (seconds), input/output token counts, and ground-truth correctness
+  labels.
+- **SDD Phase Mapping**:
+  - `apply`: code generation, programming (`humaneval`, `mbpp`, `python`).
+  - `design`: mathematical reasoning, multi-step problem solving (`gsm8k`, `math`, `arc`).
+  - `spec`: logic, formal reasoning (`logic`, `r2bench`).
+  - `verify`: unit tests, output evaluation (`verification`, `eval`, `testing`).
+  - `tasks`: planning, action breakdown (`planning`, `tasks`).
+  - `research`: search, information retrieval (`search`, `research`).
+  - `explore`: reading comprehension, general QA (`drop`, `squad`, `mmlu`).
+  - `propose`: summarization, draft generation (`summarization`, `propose`).
+- **Dataset Provenance**: Examples and preference pairs derived from these snapshots record
+  `label_provenance: "ground_truth_traces"`.
+
+### 5.2 RouteLLM (`lm-sys/RouteLLM`)
+
+- **Role**: Pairwise battle and threshold routing ground truth (`source: routellm`).
+- **Characteristics**: Pairwise preference battles between economy (e.g. Llama-3-8B, Mixtral-8x7B)
+  and frontier (e.g. GPT-4, Claude 3.5 Sonnet) models with routing thresholds.
+- **System One Calibration**:
+  - **Choice**: Captures candidate model preference/affinity (`model_a` vs `model_b` vs `tie`).
+  - **Noul (`noul_fast_success`)**: Evaluates whether the economy model successfully satisfied the
+    prompt without requiring escalation to the frontier model (`1.0` if economy model wins/ties or
+    meets threshold quality; `0.0` if frontier escalation was necessary).
+- **Dataset Provenance**: `label_provenance: "ground_truth_traces"`.
+
+### 5.3 SWE-Traces & Aider Benchmarks (`princeton-nlp/SWE-bench_Lite`)
+
+- **Role**: Real software engineering agent execution trajectories (`source: swe-traces`).
+- **Characteristics**: Real GitHub issues and repo contexts containing problem statements,
+  repository metadata, model configurations, token consumption, code diffs/patches, and unit test
+  pass/fail verification outcomes.
+- **SDD Phase Mapping**:
+  - `apply`: code editing and patch application (diffs, patches, code modifications).
+  - `verify`: test suite execution and evaluation commands (`test_command`, test pass/fail).
+  - `tasks`: issue triage, planning, and task decomposition.
+  - `explore`: repository exploration, codebase search, context gathering.
+- **Dataset Provenance**: `label_provenance: "ground_truth_traces"`.
+
 ## Policy
 
-- External benchmark data = **prior**; real telemetry = **personalization
-  signal**. Phase thresholds (quality floors) are configured per phase in
-  `router.yaml`, not learned in Phase 1.
+- External benchmark data = **prior**; empirical traces = **ground-truth evidence**;
+  real telemetry = **personalization signal**. Phase thresholds (quality floors) are configured
+  per phase in `router.yaml`, not learned in Phase 1.

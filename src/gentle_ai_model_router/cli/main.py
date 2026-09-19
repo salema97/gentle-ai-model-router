@@ -31,10 +31,13 @@ from gentle_ai_model_router.collector.local_discovery import (
     collect_local_candidates,
 )
 from gentle_ai_model_router.collector.logging_conf import setup_logging
+from gentle_ai_model_router.collector.routellm import RouteLLMCollector
+from gentle_ai_model_router.collector.routerbench import RouterBenchCollector
 from gentle_ai_model_router.collector.routing_benchmarks import (
     RoutingBenchmarksCollector,
 )
 from gentle_ai_model_router.collector.snapshots import SnapshotRecord, SnapshotStore
+from gentle_ai_model_router.collector.swe_traces import SWETracesCollector
 from gentle_ai_model_router.integration import codex_adapter as cx
 from gentle_ai_model_router.integration import gentle_state_adapter as gs
 from gentle_ai_model_router.integration import opencode_adapter as oa
@@ -186,6 +189,54 @@ def _collect_benchmarks(config: RouterConfig, store: SnapshotStore) -> SnapshotR
         collector.close()
 
 
+def _collect_routerbench(
+    config: RouterConfig,
+    store: SnapshotStore,
+    force: bool = False,
+    max_age_hours: int | None = None,
+) -> SnapshotRecord:
+    collector = RouterBenchCollector(config.data_sources.routerbench, store)
+    try:
+        return collector.collect(force=force, max_age_hours=max_age_hours)
+    except Exception as exc:
+        err_console.print(f"[red]error: routerbench collection failed: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        collector.close()
+
+
+def _collect_routellm(
+    config: RouterConfig,
+    store: SnapshotStore,
+    force: bool = False,
+    max_age_hours: int | None = None,
+) -> SnapshotRecord:
+    collector = RouteLLMCollector(config.data_sources.routellm, store)
+    try:
+        return collector.collect(force=force, max_age_hours=max_age_hours)
+    except Exception as exc:
+        err_console.print(f"[red]error: routellm collection failed: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        collector.close()
+
+
+def _collect_swe_traces(
+    config: RouterConfig,
+    store: SnapshotStore,
+    force: bool = False,
+    max_age_hours: int | None = None,
+) -> SnapshotRecord:
+    collector = SWETracesCollector(config.data_sources.swe_traces, store)
+    try:
+        return collector.collect(force=force, max_age_hours=max_age_hours)
+    except Exception as exc:
+        err_console.print(f"[red]error: swe-traces collection failed: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        collector.close()
+
+
 def _print_local_result(result: DiscoveryResult) -> None:
     table = Table(title="local candidates")
     table.add_column("model")
@@ -205,12 +256,28 @@ def _print_local_result(result: DiscoveryResult) -> None:
         err_console.print(f"[dim]note: {note}[/dim]")
 
 
+def _warn_all_continue(src: str) -> None:
+    err_console.print(
+        f"[yellow]warning: {src} collection failed; continuing with remaining sources[/yellow]"
+    )
+
+
+def _warn_snapshot_errors(record: SnapshotRecord) -> None:
+    if record.errors:
+        err_console.print(
+            f"[yellow]warning: {len(record.errors)} error(s) recorded in snapshot meta[/yellow]"
+        )
+
+
 @app.command()
 def collect(
     source: str = typer.Option(
         ...,
         "--source",
-        help="Data source: aa | arena | local | telemetry | benchmarks | all.",
+        help=(
+            "Data source: aa | arena | local | telemetry | benchmarks | "
+            "routerbench | routellm | swe-traces | all."
+        ),
     ),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
@@ -220,7 +287,17 @@ def collect(
     ),
 ) -> None:
     """Collect from a data source into the snapshot store."""
-    valid = {"aa", "arena", "local", "telemetry", "benchmarks", "all"}
+    valid = {
+        "aa",
+        "arena",
+        "local",
+        "telemetry",
+        "benchmarks",
+        "routerbench",
+        "routellm",
+        "swe-traces",
+        "all",
+    }
     if source not in valid:
         err_console.print(
             f"[red]error: unknown source '{source}' (expected one of {sorted(valid)})[/red]"
@@ -228,29 +305,67 @@ def collect(
         raise typer.Exit(code=2)
     config, store = _load_ctx(config_path, data_dir)
     if source in {"aa", "all"}:
-        record = _collect_aa(config, store, force, max_age_hours)
-        _print_record(record)
-        if record.errors:
-            err_console.print(
-                f"[yellow]warning: {len(record.errors)} error(s) recorded in snapshot meta[/yellow]"
-            )
+        try:
+            record = _collect_aa(config, store, force, max_age_hours)
+            _print_record(record)
+            _warn_snapshot_errors(record)
+        except (typer.Exit, Exception):
+            if source != "all":
+                raise
+            _warn_all_continue("aa")
     if source in {"arena", "all"}:
-        record = _collect_arena(config, store)
-        _print_record(record)
+        try:
+            record = _collect_arena(config, store)
+            _print_record(record)
+        except (typer.Exit, Exception):
+            if source != "all":
+                raise
+            _warn_all_continue("arena")
     if source in {"telemetry", "all"}:
-        record = _collect_telemetry(config, store)
-        _print_record(record)
-        if record.errors:
-            err_console.print(
-                f"[yellow]warning: {len(record.errors)} error(s) recorded in snapshot meta[/yellow]"
-            )
+        try:
+            record = _collect_telemetry(config, store)
+            _print_record(record)
+            _warn_snapshot_errors(record)
+        except (typer.Exit, Exception):
+            if source != "all":
+                raise
+            _warn_all_continue("telemetry")
     if source in {"benchmarks", "all"}:
-        record = _collect_benchmarks(config, store)
-        _print_record(record)
-        if record.errors:
-            err_console.print(
-                f"[yellow]warning: {len(record.errors)} error(s) recorded in snapshot meta[/yellow]"
-            )
+        try:
+            record = _collect_benchmarks(config, store)
+            _print_record(record)
+            _warn_snapshot_errors(record)
+        except (typer.Exit, Exception):
+            if source != "all":
+                raise
+            _warn_all_continue("benchmarks")
+    if source in {"routerbench", "all"}:
+        try:
+            record = _collect_routerbench(config, store, force=force, max_age_hours=max_age_hours)
+            _print_record(record)
+            _warn_snapshot_errors(record)
+        except (typer.Exit, Exception):
+            if source != "all":
+                raise
+            _warn_all_continue("routerbench")
+    if source in {"routellm", "all"}:
+        try:
+            record = _collect_routellm(config, store, force=force, max_age_hours=max_age_hours)
+            _print_record(record)
+            _warn_snapshot_errors(record)
+        except (typer.Exit, Exception):
+            if source != "all":
+                raise
+            _warn_all_continue("routellm")
+    if source in {"swe-traces", "all"}:
+        try:
+            record = _collect_swe_traces(config, store, force=force, max_age_hours=max_age_hours)
+            _print_record(record)
+            _warn_snapshot_errors(record)
+        except (typer.Exit, Exception):
+            if source != "all":
+                raise
+            _warn_all_continue("swe-traces")
     if source in {"local", "all"}:
         result = collect_local_candidates(config.data_sources.local_discovery)
         _print_local_result(result)

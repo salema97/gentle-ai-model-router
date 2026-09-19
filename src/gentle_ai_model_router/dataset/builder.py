@@ -41,9 +41,11 @@ from sqlalchemy.orm import Session
 from gentle_ai_model_router.collector.routing_benchmarks import map_task_to_phase
 from gentle_ai_model_router.collector.snapshots import SnapshotStore
 from gentle_ai_model_router.dataset.schema import (
+    GROUND_TRUTH_PROVENANCE_ADDENDUM,
     MODEL_FEATURE_NAMES,
     PROVENANCE_BOOTSTRAP,
     PROVENANCE_EMPIRICAL,
+    PROVENANCE_GROUND_TRUTH,
     PROVENANCE_STATEMENT,
     PROVENANCE_TELEMETRY,
     TELEMETRY_PROVENANCE_ADDENDUM,
@@ -113,6 +115,12 @@ class DatasetBuilderConfig(BaseModel):
     include_empirical_benchmarks: bool = True
     empirical_snapshot_source: str = "routing-benchmarks"
     max_empirical_tasks_per_phase: int = 30
+    # Ground-truth traces (RouterBench, RouteLLM, SWE-Traces)
+    include_ground_truth_traces: bool = True
+    ground_truth_snapshot_sources: list[str] = Field(
+        default_factory=lambda: ["routerbench", "routellm", "swe-traces"]
+    )
+    max_ground_truth_tasks_per_phase: int = 30
     # Temporal split (required — forcing an explicit decision is deliberate).
     train_end: date
     val_end: date | None = None
@@ -477,6 +485,113 @@ def _extract_empirical_samples(data: Any) -> list[dict[str, Any]]:
                     }
                 )
 
+    return samples
+
+
+def _extract_ground_truth_samples(source_name: str, payload: Any) -> list[dict[str, Any]]:
+    """Extract normalized ground-truth evaluation samples from snapshot payload."""
+    data = (
+        payload.get("data")
+        if isinstance(payload, dict) and "data" in payload
+        else payload
+    )
+    if not isinstance(data, dict):
+        if isinstance(data, list):
+            rows = data
+        else:
+            return []
+    else:
+        rows = data.get("samples") or data.get("trajectories") or []
+        if not isinstance(rows, list):
+            return []
+
+    samples: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        if source_name == "swe-traces" or "diff" in item:
+            inst_id = str(item.get("instance_id") or item.get("task_id") or "trace")
+            prompt = str(
+                item.get("task_description")
+                or item.get("problem_statement")
+                or item.get("prompt")
+                or ""
+            )
+            task_name = str(item.get("repo") or inst_id)
+            phase = str(item.get("mapped_phase") or "apply")
+            model = str(item.get("model_name") or item.get("model") or "")
+            quality = 1.0 if item.get("test_passed") else 0.0
+            cost = float(item.get("cost") or 0.0)
+            in_tokens = int(item.get("input_tokens") or item.get("prompt_tokens") or 1500)
+            samples.append({
+                "task_name": task_name,
+                "prompt": prompt,
+                "model": model,
+                "model_name": model,
+                "quality": quality,
+                "cost": cost,
+                "input_tokens": in_tokens,
+                "phase": phase,
+                "mapped_phase": phase,
+            })
+        elif source_name == "routellm" or "model_a" in item:
+            prompt = str(item.get("prompt") or item.get("instruction") or "")
+            task_name = str(item.get("task_name") or item.get("task") or "routellm")
+            phase = str(item.get("mapped_phase") or "explore")
+            in_tokens = int(item.get("input_tokens") or 1000)
+            m_a = str(item.get("model_a") or "")
+            if m_a:
+                samples.append({
+                    "task_name": task_name,
+                    "prompt": prompt,
+                    "model": m_a,
+                    "model_name": m_a,
+                    "quality": float(
+                        item.get("score_a") if item.get("score_a") is not None else 0.5
+                    ),
+                    "cost": float(item.get("cost_a") or 0.0),
+                    "input_tokens": in_tokens,
+                    "phase": phase,
+                    "mapped_phase": phase,
+                })
+            m_b = str(item.get("model_b") or "")
+            if m_b:
+                samples.append({
+                    "task_name": task_name,
+                    "prompt": prompt,
+                    "model": m_b,
+                    "model_name": m_b,
+                    "quality": float(
+                        item.get("score_b") if item.get("score_b") is not None else 0.5
+                    ),
+                    "cost": float(item.get("cost_b") or 0.0),
+                    "input_tokens": in_tokens,
+                    "phase": phase,
+                    "mapped_phase": phase,
+                })
+        else:
+            prompt = str(item.get("prompt") or item.get("query") or "")
+            task_name = str(item.get("task_name") or item.get("task") or "routerbench")
+            phase = str(item.get("mapped_phase") or "apply")
+            model = str(item.get("model_name") or item.get("model") or "")
+            quality = float(
+                item.get("correctness")
+                if item.get("correctness") is not None
+                else item.get("score", 0.5)
+            )
+            cost = float(item.get("cost") or 0.0)
+            in_tokens = int(item.get("input_tokens") or item.get("prompt_tokens") or 1000)
+            samples.append({
+                "task_name": task_name,
+                "prompt": prompt,
+                "model": model,
+                "model_name": model,
+                "quality": quality,
+                "cost": cost,
+                "input_tokens": in_tokens,
+                "phase": phase,
+                "mapped_phase": phase,
+            })
     return samples
 
 
@@ -941,6 +1056,139 @@ def build_examples(
                         )
                         staged.append((example, model.id))
 
+    # --- ground-truth traces (RouterBench, RouteLLM, SWE-Traces) ------------- #
+    if builder.include_ground_truth_traces and store is not None:
+        for source_name in builder.ground_truth_snapshot_sources:
+            latest_snap = store.latest(source_name)
+            if not latest_snap:
+                continue
+            snap_id = latest_snap.get("snapshot_id")
+            if snap_id and snap_id not in dataset.source_snapshot_ids:
+                dataset.source_snapshot_ids.append(snap_id)
+            gt_samples = _extract_ground_truth_samples(source_name, latest_snap)
+            for phase in builder.phases:
+                priors = priors_by_phase[phase]
+                phase_samples = [
+                    s
+                    for s in gt_samples
+                    if (s.get("phase") or s.get("mapped_phase")) == phase
+                ]
+                task_groups: dict[tuple[str, str], dict[str, Any]] = {}
+                for s in phase_samples:
+                    t_name = str(s.get("task_name") or "ground_truth")
+                    p_text = str(s.get("prompt") or "")
+                    key = (t_name, p_text)
+                    if key not in task_groups:
+                        if len(task_groups) >= builder.max_ground_truth_tasks_per_phase:
+                            continue
+                        task_groups[key] = {
+                            "task_name": t_name,
+                            "prompt": p_text,
+                            "phase": phase,
+                            "input_tokens": s.get("input_tokens") or 1000,
+                            "models": {},
+                        }
+                    m = s.get("model") or s.get("model_name")
+                    if m:
+                        task_groups[key]["models"][m] = {
+                            "quality": s.get("quality", 0.5),
+                            "cost": s.get("cost", 0.0),
+                        }
+                        if "model" not in task_groups[key]:
+                            task_groups[key]["model"] = m
+                            task_groups[key]["quality"] = s.get("quality", 0.5)
+                            task_groups[key]["cost"] = s.get("cost", 0.0)
+
+                for task_group in task_groups.values():
+                    t_name = task_group.get("task_name", "")
+                    p_text = task_group.get("prompt", "")
+                    task_id = "task-gt-" + hashlib.sha256(
+                        f"{source_name}:{phase}:{t_name}:{p_text}".encode()
+                    ).hexdigest()[:16]
+                    task_text = (
+                        f"[phase] {phase}\n"
+                        f"[source] {source_name}\n"
+                        f"[task_type] {t_name}\n"
+                        f"[task] {str(p_text)[:400].strip()}"
+                    )
+                    input_tokens = int(task_group.get("input_tokens") or 1000)
+
+                    for model, _provider, deployment, variant in raw:
+                        base = max(policy.base_tokens, input_tokens)
+                        multiplier = policy.effort_token_multiplier.get(variant.effort, 1.0)
+                        est_tokens = base * multiplier
+                        group_key = (phase, task_id)
+                        group_tokens[group_key] = max(
+                            group_tokens.get(group_key, 0.0), est_tokens
+                        )
+
+                        price = price_by_deployment.get(deployment.id)
+                        in_p = (
+                            price.input_price
+                            if price and price.input_price is not None
+                            else policy.default_input_price
+                        )
+                        out_p = (
+                            price.output_price
+                            if price and price.output_price is not None
+                            else policy.default_output_price
+                        )
+                        est_cost = estimate_cost(policy, in_p, out_p, est_tokens)
+
+                        matched, match_q, match_cost = _match_candidate_model(
+                            model, task_group
+                        )
+                        if matched:
+                            quality = match_q
+                            if match_cost is not None and match_cost > 0.0:
+                                est_cost = match_cost
+                            label_provenance = PROVENANCE_GROUND_TRUTH
+                        else:
+                            quality = effort_quality(priors[model.id], variant.effort, policy)
+                            label_provenance = PROVENANCE_BOOTSTRAP
+
+                        dates = model_source_dates[model.id]
+                        example_date = max(dates) if dates else newest_snapshot_date
+
+                        example = DatasetExample(
+                            example_id="",
+                            task_id=task_id,
+                            phase=phase,
+                            task_type=task_group.get("task_name", "ground_truth"),
+                            context_tokens=input_tokens,
+                            task_text=task_text,
+                            candidate=CandidateRef(
+                                model=model.canonical_id,
+                                deployment=deployment.deployment_ref,
+                                effort=variant.effort,
+                            ),
+                            model_features=_model_feature_vector(
+                                model,
+                                price,
+                                (in_p, out_p),
+                                tps_proxy=(
+                                    speed_rows[model.id] / speed_top
+                                    if speed_rows and speed_top and model.id in speed_rows
+                                    else 0.0
+                                ),
+                            ),
+                            benchmark_features=[
+                                scores.get((model.id, k), 0.0) for k in bench_names
+                            ],
+                            benchmark_feature_names=bench_names,
+                            cost_features={
+                                "est_input_tokens": est_tokens * (1 - policy.output_fraction),
+                                "est_output_tokens": est_tokens * policy.output_fraction,
+                                "est_total_tokens": est_tokens,
+                                "est_cost": est_cost,
+                            },
+                            label_utility=0.0,
+                            label_quality_estimate=quality,
+                            label_provenance=label_provenance,
+                            snapshot_date=example_date.isoformat(),
+                        )
+                        staged.append((example, model.id))
+
     # --- telemetry executions (additive; utility filled after group maxima) - #
     staged_tel: list[tuple[DatasetExample, int]] = []  # (example, model_id)
     telemetry_group_tokens: dict[tuple[str, str], float] = {}
@@ -1186,14 +1434,18 @@ def build_examples(
                 pair_date = max(a.snapshot_date, b.snapshot_date)
                 mid_a = canonical_to_id[a.candidate.model]
                 mid_b = canonical_to_id[b.candidate.model]
-                pair_provenance = (
-                    PROVENANCE_EMPIRICAL
-                    if (
-                        a.label_provenance == PROVENANCE_EMPIRICAL
-                        or b.label_provenance == PROVENANCE_EMPIRICAL
-                    )
-                    else PROVENANCE_BOOTSTRAP
-                )
+                if (
+                    a.label_provenance == PROVENANCE_GROUND_TRUTH
+                    or b.label_provenance == PROVENANCE_GROUND_TRUTH
+                ):
+                    pair_provenance = PROVENANCE_GROUND_TRUTH
+                elif (
+                    a.label_provenance == PROVENANCE_EMPIRICAL
+                    or b.label_provenance == PROVENANCE_EMPIRICAL
+                ):
+                    pair_provenance = PROVENANCE_EMPIRICAL
+                else:
+                    pair_provenance = PROVENANCE_BOOTSTRAP
                 dataset.pairs.append(
                     PreferencePair(
                         pair_id="pr-" + hashlib.sha256(
@@ -1212,6 +1464,11 @@ def build_examples(
                     )
                 )
                 pair_count += 1
+
+    if any(e.label_provenance == PROVENANCE_GROUND_TRUTH for e in dataset.examples):
+        dataset.label_provenance_statement = (
+            dataset.label_provenance_statement + "\n\n" + GROUND_TRUTH_PROVENANCE_ADDENDUM
+        )
 
     return dataset
 

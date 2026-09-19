@@ -20,6 +20,7 @@ NORMALIZATION_VERSION = "1"  # internal effort taxonomy (registry/normalize.py)
 PROVENANCE_BOOTSTRAP = "bootstrap_prior"
 PROVENANCE_TELEMETRY = "telemetry"
 PROVENANCE_EMPIRICAL = "empirical_benchmark"
+PROVENANCE_GROUND_TRUTH = "ground_truth_traces"
 
 # Schema history (cost_features key set is part of the version):
 # - v1: est_input_tokens, est_output_tokens, est_total_tokens, est_cost.
@@ -209,4 +210,13 @@ TELEMETRY_PROVENANCE_ADDENDUM = (
     "and phase-biased toward whatever the router actually routed. Bootstrap "
     "and telemetry rows are comparable by construction (same utility "
     "formula); keep provenance per row when slicing metrics."
+)
+
+# Appended to PROVENANCE_STATEMENT when the dataset mixes in ground-truth trace rows.
+GROUND_TRUTH_PROVENANCE_ADDENDUM = (
+    "ADDENDUM (ground-truth traces): rows with label_provenance='ground_truth_traces' "
+    "carry empirical execution outcomes from public ground-truth datasets (RouterBench, "
+    "RouteLLM, SWE-Traces) evaluated across models with exact cost, latency, test results, "
+    "or win/loss labels. They represent real empirical task execution evidence mapped "
+    "to SDD phases."
 )

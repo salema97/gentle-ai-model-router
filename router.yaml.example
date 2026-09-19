@@ -132,10 +132,14 @@ training:
   max_length: 512
   seed: 42
 
-api_server:
-  host: "127.0.0.1"
+# FastAPI server (api/server.py), consumed by `router serve`.
+api:
+  host: "127.0.0.1"            # local-first: bind localhost unless you know better
   port: 8377
   route_path: "/route"
+  # Telemetry shim SQLite for persisted /route decisions. Null falls back to
+  # data_dir/telemetry.sqlite (RouterConfig.telemetry_url).
+  shim_db_path: null
 
 logging:
   level: "INFO"

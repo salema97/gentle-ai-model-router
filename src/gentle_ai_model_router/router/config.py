@@ -76,6 +76,11 @@ class ApiConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8377
     route_path: str = "/route"
+    # Telemetry shim SQLite used to persist /route decisions. Accepts a plain
+    # filesystem path or a SQLAlchemy URL. None falls back to
+    # ``RouterConfig.telemetry_url`` (data_dir/telemetry.sqlite); the app
+    # factory also accepts no shim at all (structured log only).
+    shim_db_path: str | None = None
 
 
 class LoggingConfig(BaseModel):

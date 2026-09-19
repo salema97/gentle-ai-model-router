@@ -117,6 +117,19 @@ def build_model(
                 pooled = torch.cat([pooled, numeric_features], dim=-1)
             return self.head(pooled).squeeze(-1)
 
+        def save_pretrained(self, out_dir: str, **kwargs: Any) -> None:
+            """Save encoder in HF format (dir root) + MLP head weights (head.pt).
+
+            Keeping the encoder at the root lets ``AutoModel.from_pretrained``
+            load it directly (used by the evaluation checkpoint path).
+            """
+            from pathlib import Path
+
+            out = Path(out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            self.encoder.save_pretrained(out, **kwargs)
+            torch.save(self.head.state_dict(), out / "head.pt")
+
     return _Ranker()
 
 

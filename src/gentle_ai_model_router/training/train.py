@@ -176,12 +176,30 @@ def train(
         report_to=[],
         disable_tqdm=True,
     )
-    trainer = Trainer(
+
+    # transformers 5.x changed the custom-loss contract: ``compute_loss_func``
+    # now receives (outputs, labels), not (model, inputs). The stable override
+    # point is the ``compute_loss`` method, so we subclass instead.
+    class _LossTrainer(Trainer):
+        def __init__(self, *args: Any, loss_fn: Any = None, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._loss_fn = loss_fn
+
+        def compute_loss(
+            self,
+            model_: Any,
+            inputs: dict[str, Any],
+            return_outputs: bool = False,
+            num_items_in_batch: Any = None,
+        ) -> Any:
+            return self._loss_fn(model_, inputs, return_outputs=return_outputs)
+
+    trainer = _LossTrainer(
         model=model,
         args=args,
         train_dataset=_RowsDataset(train_rows),
         data_collator=collate,
-        compute_loss=compute_loss,
+        loss_fn=compute_loss,
     )
     logger.info(
         "training start objective=%s rows=%d out=%s",

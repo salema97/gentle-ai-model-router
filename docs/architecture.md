@@ -1,10 +1,20 @@
 # Target Architecture — Gentle AI Model Router
 
-**Status**: DESIGN. Phase 0 skeleton only; nothing here is implemented yet.
-Claims about Gentle AI internals are backed by
+**Status**: Phases 0–3a IMPLEMENTED (collectors, registry, dataset builder,
+deterministic baseline policy + escalation ladder, DeBERTa ranker
+training/eval harness `[train]`, telemetry shim, OpenCode adapter, FastAPI
+`/route` server + policy inspection CLI). The component table below marks
+each module ✅ implemented / ⏳ pending; the original design text is kept
+for the pending parts. Claims about Gentle AI internals are backed by
 `docs/gentle-ai-integration-research.md` (evidence: file + line in the
 reference clone). Items marked **[PENDING VERIFICATION]** depend on external
 systems and must be re-validated before Phase 1 implementation.
+
+**Pending (explicitly not implemented)**: the bandit/policy learning loop on
+telemetry (Phase 4), Pi + Codex adapters, the learned-policy promotion
+workflow (a trained DeBERTa checkpoint replacing the baseline only after it
+beats it offline), and real hook attachment into Gentle AI runtimes (today
+only the OpenCode write adapter and the JSONL ingest shim surface exist).
 
 ## Objective
 
@@ -81,11 +91,11 @@ regress success rate below a configurable threshold).
            │                 │                   │
            └─────────┬───────┴───────────────────┘
                      ▼
-           ┌──────────────────┐
-           │  FastAPI /route  │  POST {phase, context} →
-           │  integration/    │  {(model, deployment, effort)}
-           │  server.py       │  + provenance (why this pick)
-           └────────┬─────────┘
+            ┌──────────────────┐
+            │  FastAPI /route  │  POST {phase, context} →
+            │  api/server.py   │  {(model, deployment, effort)}
+            │  (✅ Phase 3a)   │  + provenance (why this pick)
+            └────────┬─────────┘
                     │
         ┌───────────┼───────────────┬──────────────┐
         ▼           ▼               ▼              ▼
@@ -103,16 +113,18 @@ regress success rate below a configurable threshold).
 
 ## Components (scaffold only — no implementation in Phase 0)
 
-| Module | Responsibility | Phase 1+ deliverable |
-|---|---|---|
-| `collector/` | Pull + snapshot external priors (Artificial Analysis, LMArena); never call upstream without a cache | Snapshot tables in Postgres + raw JSON under `data/` |
-| `registry/` | Schema + migrations + CRUD for models, deployments, capabilities, prices, scores, availability | Alembic/SQLModel schema; sqlite fallback via env |
-| `dataset/` | Join telemetry × priors into training rows; dataset versioning | Versioned parquet exports keyed by registry snapshot id |
-| `training/` | DeBERTa-based phase/context encoder + ranker; constrained policy | Fine-tune `microsoft/deberta-v3-base` **[PENDING VERIFICATION: exact checkpoint + GPU budget]**; fallback: GBM on tabular features first |
-| `router/` | Serve ranked candidates, apply phase thresholds + escalation | Deterministic policy before learned ranker is trustworthy |
-| `integration/` | Gentle AI runtime adapters (write opencode.json / models.json / codex tables), FastAPI `/route` server | Adapters per §6 of the research doc |
-| `cli/` | `router collect|build|train|serve|apply` commands | Typer-based CLI |
-| `tests/` | Unit + contract tests (config-surface writers against golden files) | — |
+| Module | Status | Responsibility | Delivered as |
+|---|---|---|---|
+| `collector/` | ✅ | Pull + snapshot external priors (Artificial Analysis, LMArena, local discovery); never call upstream without a cache | `collector/artificial_analysis.py`, `collector/arena.py`, `collector/local_discovery.py`, `collector/snapshots.py` |
+| `registry/` | ✅ | Schema + CRUD for models, deployments, capabilities, prices, scores, availability | `registry/models.py`, `registry/db.py` (idempotent upserts), `registry/normalize.py`; SQLite fallback via env, Postgres-compatible |
+| `registry/fingerprint.py` | ✅ | Cheap deterministic registry fingerprint (`count:max_id` per table, sha256) for API determinism + policy-cache invalidation | `registry_fingerprint(engine)` |
+| `dataset/` | ✅ | Join priors into training rows (labels = bootstrap priors); temporal anti-leakage splits; dataset versioning | `dataset/builder.py`, versioned exports under `data/datasets/` |
+| `training/` | ✅ (baseline) / ⏳ (learned promotion) | DeBERTa phase/context ranker training + offline evaluation; **learned-policy promotion workflow pending** — a checkpoint only replaces the baseline after beating it offline | `training/train.py`, `training/evaluate.py` (`[train]` extra) |
+| `router/` | ✅ | Deterministic prior-weighted policy: min-sufficient-effort selection, per-phase quality floors, hard filters, escalation ladder; full ranking exposed for inspection | `router/policy.py` (`rank_candidates`/`select_candidate`), `router/decision.py`, `router/escalation.py`, `router/config.py` |
+| `api/` | ✅ | FastAPI `/route` server (per-request decisions, `registry_hash`/`policy_version` provenance, shim decision logging, 422/503 fail-closed semantics) + cached `/policy` + `/health` | `api/server.py`, `api/schemas.py`; `router serve` launches uvicorn on localhost |
+| `integration/` | ✅ OpenCode + telemetry shim / ⏳ Pi, Codex, real hook attachment | Gentle AI runtime adapters; **real hook attachment into runtimes is pending** (today: write adapter for opencode.json + JSONL ingest shim) | `integration/opencode_adapter.py`, `integration/telemetry_shim.py` |
+| `cli/` | ✅ | `router collect|normalize|route|policy|explain|export|serve|build-dataset|train|evaluate|integrate|shim` | `cli/main.py` (Typer) |
+| `tests/` | ✅ | Unit + CLI + API contract tests (99+ before Phase 3a; 119 + Phase 3a suite after) | `tests/` |
 
 ## Key design decisions (to validate in Phase 1)
 

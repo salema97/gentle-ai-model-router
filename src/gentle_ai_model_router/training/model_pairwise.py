@@ -51,6 +51,10 @@ def build_pairwise_model(
             s_b = self.scorer(input_ids_b, attention_mask_b, numeric_b)
             return s_a, s_b, s_a - s_b
 
+        def save_pretrained(self, out_dir: str, **kwargs: Any) -> None:
+            """Delegate to the inner pointwise ranker (encoder + head.pt)."""
+            self.scorer.save_pretrained(out_dir, **kwargs)
+
     return _PairwiseRanker()
 
 

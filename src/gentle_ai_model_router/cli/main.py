@@ -35,7 +35,12 @@ from gentle_ai_model_router.registry import db as registry_db
 from gentle_ai_model_router.registry.normalize import Effort
 from gentle_ai_model_router.router.config import RouterConfig, load_config
 from gentle_ai_model_router.router.decision import CANONICAL_PHASES, TaskContext
-from gentle_ai_model_router.router.policy import PolicyError, select_candidate
+from gentle_ai_model_router.router.policy import (
+    CandidateRanking,
+    PolicyError,
+    rank_candidates,
+    select_candidate,
+)
 
 app = typer.Typer(
     name="router",
@@ -316,6 +321,233 @@ def route(
             ),
         )
     console.print(table)
+
+
+def _open_registry(config: RouterConfig):
+    engine, _effective = registry_db.get_engine_with_fallback(
+        config.database_url, config.sqlite_fallback_url
+    )
+    registry_db.init_schema(engine)
+    return engine
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3a: FastAPI server + policy inspection CLI
+# --------------------------------------------------------------------------- #
+
+
+@app.command()
+def serve(
+    host: str | None = typer.Option(None, "--host", help="Bind host (default: config api.host)."),
+    port: int | None = typer.Option(None, "--port", help="Bind port (default: config api.port)."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Serve the routing API over uvicorn (localhost by default, local-first)."""
+    import uvicorn
+
+    from gentle_ai_model_router.api.server import create_app
+
+    config, _ = _load_ctx(config_path, data_dir)
+    engine = _open_registry(config)
+    shim_url = config.api.shim_db_path or config.telemetry_url
+    if "://" not in shim_url:
+        shim_url = f"sqlite:///{shim_url}"  # plain SQLite path → SQLAlchemy URL
+    shim_store = telemetry_shim.ShimStore(shim_url)
+    shim_store.init_schema()
+    api_app = create_app(config, engine, shim_store)
+    bind_host = host or config.api.host
+    bind_port = port or config.api.port
+    console.print(f"serving gentle-ai-model-router on http://{bind_host}:{bind_port}")
+    uvicorn.run(api_app, host=bind_host, port=bind_port)
+
+
+@app.command()
+def policy(
+    phase: str | None = typer.Option(
+        None, "--phase", help="One SDD phase (default: all 11 canonical phases)."
+    ),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Show the active per-phase policy: recommended config + top-3 alternatives."""
+    config, _ = _load_ctx(config_path, data_dir)
+    engine = _open_registry(config)
+    phases = [phase] if phase else list(CANONICAL_PHASES)
+    try:
+        with registry_db.Session(engine) as session:
+            for ph in phases:
+                ranking = rank_candidates(session, ph, config)
+                _print_policy_table(ranking)
+    except PolicyError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+
+def _print_policy_table(ranking: CandidateRanking) -> None:
+    """Render one phase ranking: selected row + top-3 alternatives."""
+    top = ranking.candidates[: 1 + 3]
+    table = Table(
+        title=f"policy: {ranking.phase} "
+        f"(threshold={ranking.threshold}, candidates={len(ranking.candidates)})"
+    )
+    table.add_column("pick", justify="right")
+    for column in ("model", "deployment", "effort", "score", "est tokens", "est cost"):
+        numeric = column in {"score", "est tokens", "est cost"}
+        table.add_column(column, justify="right" if numeric else "left")
+    for idx, c in enumerate(top):
+        table.add_row(
+            "*" if idx == 0 else str(idx),
+            c.model.canonical_id,
+            c.deployment.deployment_ref,
+            c.variant.effort,
+            f"{c.score:.4f}",
+            f"{c.estimated_tokens:.0f}",
+            f"${c.estimated_cost:.6f}",
+        )
+    console.print(table)
+
+
+@app.command()
+def explain(
+    phase: str = typer.Option(..., "--phase", help="SDD phase to explain."),
+    task: str | None = typer.Option(
+        None, "--task", help="Task description (echoed for context; not scored yet)."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print the Decision as JSON."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Explain the ranking for a phase: full candidate ladder + selected config."""
+    from gentle_ai_model_router.router.policy import normalize_phase
+
+    config, _ = _load_ctx(config_path, data_dir)
+    engine = _open_registry(config)
+    try:
+        phase_name = normalize_phase(phase)
+    except PolicyError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    try:
+        with registry_db.Session(engine) as session:
+            if as_json:
+                decision = select_candidate(session, phase_name, config)
+                console.print(json.dumps(decision.to_dict(), indent=2))
+                return
+            ranking = rank_candidates(session, phase_name, config)
+    except PolicyError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    summary = Table(title=f"explain: {phase_name}")
+    summary.add_row("phase (canonical)", ranking.phase)
+    if task:
+        summary.add_row("task", task)
+    summary.add_row("registry (model,deployment) pairs", str(ranking.pairs_considered))
+    summary.add_row("threshold_quality", str(ranking.threshold))
+    summary.add_row("policy_version", ranking.policy_version)
+    console.print(summary)
+
+    winner = ranking.candidates[0]
+    table = Table(title=f"candidate ranking (top {min(10, len(ranking.candidates))})")
+    table.add_column("pick", justify="right")
+    for column in ("model", "deployment", "effort", "quality", "est tokens", "est cost", "score"):
+        table.add_column(
+            column,
+            justify="right" if column in {"quality", "est tokens", "est cost", "score"} else "left",
+        )
+    for idx, c in enumerate(ranking.candidates[:10]):
+        table.add_row(
+            "*" if idx == 0 else str(idx),
+            c.model.canonical_id,
+            c.deployment.deployment_ref,
+            c.variant.effort,
+            f"{c.quality:.4f}",
+            f"{c.estimated_tokens:.0f}",
+            f"${c.estimated_cost:.6f}",
+            f"{c.score:.4f}",
+        )
+    console.print(table)
+
+    selected = Table(title="selected configuration")
+    selected.add_row("model", winner.model.canonical_id)
+    selected.add_row("provider", winner.provider.registry_key)
+    selected.add_row("deployment", winner.deployment.deployment_ref)
+    selected.add_row("effort", winner.variant.effort)
+    selected.add_row("estimated_tokens", f"{winner.estimated_tokens:.0f}")
+    selected.add_row("estimated_cost", f"${winner.estimated_cost:.6f}")
+    selected.add_row("reason_codes", ", ".join(winner.reason_codes + ("cheapest_of_meeting",)))
+    console.print(selected)
+
+
+@app.command()
+def export(
+    output: str | None = typer.Option(
+        None, "--output", help="Target file (default: models/policy/<policy_version>.json)."
+    ),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Export the active policy as JSON (the Gentle AI integration artifact)."""
+    from datetime import UTC, datetime
+
+    from gentle_ai_model_router.registry.fingerprint import registry_fingerprint
+    from gentle_ai_model_router.router.policy import full_policy_version, rank_candidates
+
+    config, _ = _load_ctx(config_path, data_dir)
+    engine = _open_registry(config)
+    try:
+        with registry_db.Session(engine) as session:
+            phases: dict[str, dict] = {}
+            for ph in CANONICAL_PHASES:
+                ranking = rank_candidates(session, ph, config)
+                phase_cfg = config.phase_config(ph)
+                winner = ranking.candidates[0]
+                phases[ph] = {
+                    "policy_version": ranking.policy_version,
+                    "thresholds": {"threshold_quality": ranking.threshold},
+                    "weights": phase_cfg.weights,
+                    "selected": {
+                        "model": winner.model.canonical_id,
+                        "provider": winner.provider.registry_key,
+                        "deployment": winner.deployment.deployment_ref,
+                        "effort": winner.variant.effort,
+                        "score": winner.score,
+                        "quality": winner.quality,
+                        "estimated_tokens": winner.estimated_tokens,
+                        "estimated_cost": winner.estimated_cost,
+                        "reason_codes": list(winner.reason_codes) + ["cheapest_of_meeting"],
+                    },
+                    "alternatives": [
+                        {
+                            "model": c.model.canonical_id,
+                            "provider": c.provider.registry_key,
+                            "deployment": c.deployment.deployment_ref,
+                            "effort": c.variant.effort,
+                            "score": c.score,
+                            "quality": c.quality,
+                            "estimated_tokens": c.estimated_tokens,
+                            "estimated_cost": c.estimated_cost,
+                        }
+                        for c in ranking.candidates[1 : config.policy.top_k]
+                    ],
+                }
+    except PolicyError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    policy_version = full_policy_version(config)
+    payload = {
+        "exported_at": datetime.now(UTC).isoformat(),
+        "policy_version": policy_version,
+        "registry_hash": registry_fingerprint(engine),
+        "phases": phases,
+    }
+    out_path = Path(output) if output else Path("models/policy") / f"{policy_version}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    console.print(f"[green]exported policy {policy_version} -> {out_path}[/green]")
 
 
 def _resolve_variants(config: RouterConfig) -> dict[tuple[str, str], list[str]]:

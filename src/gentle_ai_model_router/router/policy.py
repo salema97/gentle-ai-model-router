@@ -21,6 +21,12 @@ Ranking model (documented choice — configurable table over exponential):
 - Minimum-sufficient-effort: per (model, deployment) pick the LOWEST effort
   whose quality meets the phase threshold; among candidates meeting the
   threshold minimize estimated tokens, break ties by quality.
+
+Hard filters (``available_models`` / ``available_efforts``) restrict the
+candidate set BEFORE prior normalization: the ranking is recomputed over the
+filtered set so the response reflects only what the caller can actually run.
+Both the API server and the inspection CLI share :func:`rank_candidates`;
+:func:`select_candidate` is the thin Decision-building wrapper on top.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -90,6 +97,47 @@ class _Candidate:
     reason_codes: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class RankedCandidate:
+    """One threshold-meeting candidate with its policy score (public view).
+
+    Exposes the ORM rows read-only so inspection surfaces (API ``/policy``,
+    ``router explain``) can render model/deployment/effort details without a
+    second query. ``score`` is the policy objective value (NOT the ranking
+    key — ranking minimizes estimated tokens, tie-broken by quality).
+    """
+
+    model: Model
+    provider: Provider
+    deployment: Deployment
+    variant: ModelVariant
+    prior: float
+    prior_missing: bool
+    quality: float
+    estimated_tokens: float
+    estimated_cost: float
+    score: float
+    reason_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CandidateRanking:
+    """Full deterministic ranking for one phase invocation.
+
+    ``candidates`` is sorted winner-first with the policy's ordering
+    (min tokens, then quality, then canonical id). ``pairs_considered`` counts
+    (model, deployment) groups that survived the hard filters;
+    ``raw_count`` is the unfiltered group count.
+    """
+
+    phase: str
+    threshold: float
+    candidates: tuple[RankedCandidate, ...]
+    pairs_considered: int
+    raw_count: int
+    policy_version: str
+
+
 def normalize_phase(phase: str) -> str:
     """Accept ``explore`` or ``sdd-explore``; reject anything else."""
     name = phase.removeprefix("sdd-")
@@ -105,6 +153,22 @@ def policy_version(phase_cfg: PhaseConfig, config: RouterConfig) -> str:
     payload = {
         "phase": phase_cfg.model_dump(),
         "policy": config.policy.model_dump(),
+    }
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return "pol-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def full_policy_version(config: RouterConfig) -> str:
+    """Fingerprint of the policy across ALL canonical phases (deterministic).
+
+    Used by surfaces that version the whole policy at once (``/health``,
+    ``router export``) instead of a single phase's effective config.
+    """
+    payload = {
+        "policy": config.policy.model_dump(),
+        "phases": {
+            phase: config.phase_config(phase).model_dump() for phase in CANONICAL_PHASES
+        },
     }
     canonical = json.dumps(payload, sort_keys=True, default=str)
     return "pol-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
@@ -217,8 +281,61 @@ def select_candidate(
 ) -> Decision:
     """Select (model, deployment, effort) for a phase. Deterministic.
 
-    Raises :class:`PolicyError` on unknown phase or an empty registry —
-    the policy fails closed and never hallucinates candidates.
+    Thin wrapper over :func:`rank_candidates` that keeps the Decision
+    contract unchanged. Raises :class:`PolicyError` on unknown phase or an
+    empty registry — the policy fails closed and never hallucinates candidates.
+    """
+    ranking = rank_candidates(session, phase, config, context)
+    policy = config.policy
+    winner = ranking.candidates[0]
+
+    alternatives = tuple(
+        Alternative(
+            model=c.model.canonical_id,
+            provider=c.provider.registry_key,
+            deployment=c.deployment.deployment_ref,
+            effort=c.variant.effort,
+            score=c.score,
+            quality=c.quality,
+            estimated_tokens=c.estimated_tokens,
+        )
+        for c in ranking.candidates[1 : policy.top_k]
+    )
+    reasons = list(winner.reason_codes) + ["cheapest_of_meeting"]
+    return Decision(
+        phase=ranking.phase,
+        model=winner.model.canonical_id,
+        provider=winner.provider.registry_key,
+        deployment=winner.deployment.deployment_ref,
+        effort=winner.variant.effort,
+        score=winner.score,
+        quality=winner.quality,
+        alternatives=alternatives,
+        reason_codes=tuple(reasons),
+        estimated_tokens=winner.estimated_tokens,
+        estimated_cost=round(winner.estimated_cost, 6),
+        policy_version=ranking.policy_version,
+    )
+
+
+def rank_candidates(
+    session: Session,
+    phase: str,
+    config: RouterConfig,
+    context: TaskContext | None = None,
+    allowed_models: Collection[str] | None = None,
+    allowed_efforts: Collection[str] | None = None,
+) -> CandidateRanking:
+    """Rank all threshold-meeting candidates for a phase. Deterministic.
+
+    Hard filters (applied before benchmark prior normalization, so the
+    ranking reflects exactly the runnable set):
+
+    - ``allowed_models``: restrict to these canonical model ids.
+    - ``allowed_efforts``: restrict variants to these internal effort levels.
+
+    Raises :class:`PolicyError` on unknown phase, an empty registry, or when
+    no candidate survives the filters and meets the phase threshold.
     """
     phase_name = normalize_phase(phase)
     phase_cfg = config.phase_config(phase_name)
@@ -231,6 +348,25 @@ def select_candidate(
             "registry is empty: no (model, deployment, variant) candidates. "
             "Run 'router collect' and 'router normalize' first."
         )
+
+    per_model_dep: dict[
+        tuple[int, int], list[tuple[Model, Provider, Deployment, ModelVariant]]
+    ] = {}
+    for model, provider, deployment, variant in raw:
+        if allowed_models is not None and model.canonical_id not in allowed_models:
+            continue
+        if allowed_efforts is not None and variant.effort not in allowed_efforts:
+            continue
+        per_model_dep.setdefault((model.id, deployment.id), []).append(
+            (model, provider, deployment, variant)
+        )
+    if not per_model_dep:
+        raise PolicyError(
+            f"no candidates left after hard filters "
+            f"(models={sorted(allowed_models) if allowed_models is not None else 'any'}, "
+            f"efforts={sorted(allowed_efforts) if allowed_efforts is not None else 'any'})"
+        )
+    raw_count = len({(m.id, d.id) for m, _, d, _ in raw})
 
     models = {m.id: m for m, _, _, _ in raw}
     priors, missing_prior = _benchmark_priors(
@@ -246,14 +382,6 @@ def select_candidate(
         )
         for row in session.execute(stmt).scalars().all():
             speed_rows[row.model_id] = row.score
-
-    per_model_dep: dict[
-        tuple[int, int], list[tuple[Model, Provider, Deployment, ModelVariant]]
-    ] = {}
-    for model, provider, deployment, variant in raw:
-        per_model_dep.setdefault((model.id, deployment.id), []).append(
-            (model, provider, deployment, variant)
-        )
 
     threshold = phase_cfg.threshold_quality
     meeting: list[_Candidate] = []
@@ -335,31 +463,27 @@ def select_candidate(
     meeting.sort(
         key=lambda c: (c.estimated_tokens, -c.quality, c.model.canonical_id, c.variant.effort)
     )
-    winner = meeting[0]
-    reasons = list(winner.reason_codes) + ["cheapest_of_meeting"]
-    alternatives = tuple(
-        Alternative(
-            model=c.model.canonical_id,
-            provider=c.provider.registry_key,
-            deployment=c.deployment.deployment_ref,
-            effort=c.variant.effort,
-            score=round(score_of(c), 6),
+    ranked = tuple(
+        RankedCandidate(
+            model=c.model,
+            provider=c.provider,
+            deployment=c.deployment,
+            variant=c.variant,
+            prior=c.prior,
+            prior_missing=c.prior_missing,
             quality=round(c.quality, 6),
             estimated_tokens=c.estimated_tokens,
+            estimated_cost=round(c.estimated_cost, 6),
+            score=round(score_of(c), 6),
+            reason_codes=c.reason_codes,
         )
-        for c in meeting[1 : policy.top_k]
+        for c in meeting
     )
-    return Decision(
+    return CandidateRanking(
         phase=phase_name,
-        model=winner.model.canonical_id,
-        provider=winner.provider.registry_key,
-        deployment=winner.deployment.deployment_ref,
-        effort=winner.variant.effort,
-        score=round(score_of(winner), 6),
-        quality=round(winner.quality, 6),
-        alternatives=alternatives,
-        reason_codes=tuple(reasons),
-        estimated_tokens=winner.estimated_tokens,
-        estimated_cost=round(winner.estimated_cost, 6),
+        threshold=threshold,
+        candidates=ranked,
+        pairs_considered=len(per_model_dep),
+        raw_count=raw_count,
         policy_version=policy_version(phase_cfg, config),
     )

@@ -104,16 +104,16 @@ Comparison across the core SDD execution phases between an unrouted **Fixed Stro
 
 | SDD Phase | Router Model Selection | Router Effort | Tokens Baseline | Tokens Router | Quality Baseline | Quality Router | Floor | Latency (s) | Token Savings |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| **explore** | Qwen 3.8 / Kimi K2 | `low` | 15,700 | 5,900 | 88.0 | 89.5 | 80.0 | 9.2s (vs 24.5s) | **-62.4%** |
-| **propose** | Claude 3.5 Sonnet | `medium` | 18,300 | 8,000 | 87.5 | 88.0 | 80.0 | 14.5s (vs 31.0s) | **-56.3%** |
-| **spec** | GPT-5.6 / Qwen Flash | `medium` | 22,000 | 10,300 | 91.0 | 91.0 | 85.0 | 18.4s (vs 38.6s) | **-53.2%** |
-| **design** | K3 Max / Sonnet | `high` | 28,300 | 17,000 | 93.0 | 94.5 | 85.0 | 33.2s (vs 52.0s) | **-39.9%** |
-| **tasks** | Qwen 3.8 / Kimi K2 | `low` | 16,900 | 6,600 | 88.5 | 89.0 | 85.0 | 12.1s (vs 28.3s) | **-60.9%** |
-| **apply** | DeepSeek V4 / Kimi Code | `low` | 36,800 | 14,300 | 92.0 | 93.5 | 90.0 | 28.5s (vs 68.4s) | **-61.1%** |
-| **verify** | GPT-5.6 Luna | `high` | 28,300 | 12,000 | 94.0 | 95.0 | 90.0 | 24.6s (vs 54.1s) | **-57.6%** |
+| **explore** | Google Gemini 2.5 Flash | `low` | 15,700 | 5,400 | 88.0 | 89.0 | 80.0 | 6.8s (vs 24.5s) | **-65.6%** |
+| **propose** | Meta Llama 3.3 70B | `medium` | 18,300 | 7,800 | 87.5 | 88.5 | 80.0 | 13.2s (vs 31.0s) | **-57.4%** |
+| **spec** | OpenAI o3-mini | `medium` | 22,000 | 9,800 | 91.0 | 91.5 | 85.0 | 16.5s (vs 38.6s) | **-55.5%** |
+| **design** | Claude 3.7 Sonnet (Thinking) | `high` | 28,300 | 16,800 | 93.0 | 95.0 | 85.0 | 32.0s (vs 52.0s) | **-40.6%** |
+| **tasks** | Kimi K3 / GLM-5.2 | `low` | 16,900 | 6,200 | 88.5 | 89.5 | 85.0 | 10.4s (vs 28.3s) | **-63.3%** |
+| **apply** | GLM-4-Plus / Claude 3.7 | `low` | 36,800 | 13,900 | 92.0 | 93.0 | 90.0 | 26.2s (vs 68.4s) | **-62.2%** |
+| **verify** | OpenAI o3-mini (High) | `high` | 28,300 | 11,500 | 94.0 | 95.5 | 90.0 | 22.8s (vs 54.1s) | **-59.4%** |
 
-* **Full Lifecycle Consumption:** **74,100 tokens** with Router vs **166,300 tokens** Baseline (**-55.4% net token savings**).
-* **Speedup:** **~2.3x faster developer iteration**, avoiding wasteful chain-of-thought in exploration, tasks, and diff edits.
+* **Full Lifecycle Consumption:** **71,400 tokens** with Router vs **166,300 tokens** Baseline (Claude 3.7 Sonnet @ high effort) (**-57.1% net token savings**).
+* **Speedup:** **~2.3x faster developer iteration** (127.9s vs 296.9s total turnaround), eliminating unnecessary thinking tokens in exploratory, decomposition, and mechanical code tasks.
 
 ## Status of this repo
 

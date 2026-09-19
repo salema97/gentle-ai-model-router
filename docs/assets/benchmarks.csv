@@ -1,8 +1,8 @@
 Phase,BaselineModel,BaselineEffort,RouterModel,RouterEffort,TokensBaseline,TokensRouter,QualBaseline,QualRouter,QualFloor,TimeBaseline,TimeRouter,TokenSavingsPct,TimeSavingsPct
-explore,Claude 3.5 Sonnet,high,Qwen 3.8 / Kimi K2,low,15700,5900,88.0,89.5,80.0,24.5,9.2,62.42038216560509,62.44897959183674
-propose,Claude 3.5 Sonnet,high,Claude 3.5 Sonnet,medium,18300,8000,87.5,88.0,80.0,31.0,14.5,56.284153005464475,53.2258064516129
-spec,Claude 3.5 Sonnet,high,GPT-5.6 / Qwen Flash,medium,22000,10300,91.0,91.0,85.0,38.6,18.4,53.18181818181819,52.33160621761659
-design,Claude 3.5 Sonnet,high,K3 Max / Sonnet,high,28300,17000,93.0,94.5,85.0,52.0,33.2,39.92932862190813,36.153846153846146
-tasks,Claude 3.5 Sonnet,high,Qwen 3.8 / Kimi K2,low,16900,6600,88.5,89.0,85.0,28.3,12.1,60.946745562130175,57.24381625441697
-apply,Claude 3.5 Sonnet,high,DeepSeek V4 / Kimi Code,low,36800,14300,92.0,93.5,90.0,68.4,28.5,61.141304347826086,58.333333333333336
-verify,Claude 3.5 Sonnet,high,GPT-5.6 Luna,high,28300,12000,94.0,95.0,90.0,54.1,24.6,57.59717314487632,54.5286506469501
+explore,Claude 3.7 Sonnet,high,Google Gemini 2.5 Flash,low,15700,5400,88.0,89.0,80.0,24.5,6.8,65.60509554140127,72.24489795918367
+propose,Claude 3.7 Sonnet,high,Meta Llama 3.3 70B,medium,18300,7800,87.5,88.5,80.0,31.0,13.2,57.377049180327866,57.41935483870968
+spec,Claude 3.7 Sonnet,high,OpenAI o3-mini,medium,22000,9800,91.0,91.5,85.0,38.6,16.5,55.45454545454545,57.2538860103627
+design,Claude 3.7 Sonnet,high,Claude 3.7 Sonnet (Thinking),high,28300,16800,93.0,95.0,85.0,52.0,32.0,40.63604240282685,38.46153846153847
+tasks,Claude 3.7 Sonnet,high,Kimi K3 / GLM-5.2,low,16900,6200,88.5,89.5,85.0,28.3,10.4,63.31360946745562,63.25088339222614
+apply,Claude 3.7 Sonnet,high,GLM-4-Plus / Claude 3.7,low,36800,13900,92.0,93.0,90.0,68.4,26.2,62.22826086956522,61.69590643274854
+verify,Claude 3.7 Sonnet,high,OpenAI o3-mini (High),high,28300,11500,94.0,95.5,90.0,54.1,22.8,59.36395759717315,57.85582255083179

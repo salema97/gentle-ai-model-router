@@ -37,6 +37,7 @@ from gentle_ai_model_router.collector.routing_benchmarks import (
 from gentle_ai_model_router.collector.snapshots import SnapshotRecord, SnapshotStore
 from gentle_ai_model_router.integration import gentle_state_adapter as gs
 from gentle_ai_model_router.integration import opencode_adapter as oa
+from gentle_ai_model_router.integration import pi_adapter as pi
 from gentle_ai_model_router.integration import telemetry_shim
 from gentle_ai_model_router.integration.outcome import apply_outcomes
 from gentle_ai_model_router.registry import db as registry_db
@@ -74,6 +75,13 @@ app.add_typer(integrate_app, name="integrate")
 app.add_typer(shim_app, name="shim")
 app.add_typer(bandit_app, name="bandit")
 integrate_app.add_typer(gentle_state_app, name="gentle-state")
+pi_app = typer.Typer(
+    help="Write sdd-<phase> model assignments into Pi's models.json "
+    "(~/.pi/gentle-ai/models.json) — the file gentle-pi's /gentle:models modal owns.",
+    no_args_is_help=True,
+    invoke_without_command=True,
+)
+integrate_app.add_typer(pi_app, name="pi")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -953,6 +961,148 @@ def integrate_gentle_state_status(
             str(entry.get("provider_id") or "-"),
             str(entry.get("model_id") or "-"),
             str(entry.get("effort") or "-"),
+        )
+    console.print(table)
+
+
+def _print_pi_followup() -> None:
+    err_console.print(
+        "[yellow]NOTE: Pi model assignment belongs to gentle-pi, not the Gentle AI[/yellow]"
+    )
+    err_console.print(
+        "[yellow]installer (docs/pi.md:119-121). This file is rewritten by the[/yellow]"
+    )
+    err_console.print(
+        "[yellow]/gentle:models modal; a router write can be overwritten by the[/yellow]"
+    )
+    err_console.print(
+        "[yellow]next modal save. Entries outside sdd-<phase> keys are preserved.[/yellow]"
+    )
+
+
+@pi_app.callback()
+def integrate_pi(
+    ctx: typer.Context,
+    phase: str | None = typer.Option(None, "--phase", help="SDD phase."),
+    model: str | None = typer.Option(None, "--model", help="provider/model."),
+    effort: str | None = typer.Option(None, "--effort", help="Thinking effort level."),
+    models: str | None = typer.Option(
+        None,
+        "--models",
+        help="Pi models.json path (default: $GENTLE_PI_CONFIG_HOME/gentle-ai/models.json "
+        "or ~/.pi/gentle-ai/models.json).",
+    ),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the diff, write nothing."),
+    create: bool = typer.Option(False, "--create", help="Create the models file if missing."),
+    verify: bool = typer.Option(
+        False, "--verify", help="Re-read the models file and confirm the assignment round-trips."
+    ),
+) -> None:
+    """Set models.json["sdd-<phase>"] = {"model", "thinking"} for Pi (gentle-pi).
+
+    The file is owned by gentle-pi and applied as --model/--thinking argv
+    pairs. Bare-string entries are upgraded to the object form; unknown keys
+    and unrecognized entry shapes are refused (fail closed), never clobbered.
+    """
+    if ctx.invoked_subcommand is not None:
+        return  # `pi rollback ...` / `pi status ...` — handled by their commands
+    required = (("--phase", phase), ("--model", model), ("--effort", effort))
+    missing = [name for name, value in required if value is None]
+    if missing:
+        err_console.print(f"[red]error: missing required option(s): {', '.join(missing)}[/red]")
+        raise typer.Exit(code=2)
+    name = phase.removeprefix("sdd-")
+    if name not in CANONICAL_PHASES:
+        err_console.print(
+            f"[red]error: unknown phase '{phase}' "
+            f"(expected one of: {', '.join(CANONICAL_PHASES)})[/red]"
+        )
+        raise typer.Exit(code=2)
+    if dry_run and verify:
+        err_console.print("[red]error: --verify requires a real write (not --dry-run)[/red]")
+        raise typer.Exit(code=2)
+    config, _ = _load_ctx(config_path, data_dir)
+    path = pi.resolve_models_path(models)
+    try:
+        result = pi.apply_assignment(
+            path, name, model, effort, create=create, dry_run=dry_run,
+            backup=config.integrate.backup,
+        )
+    except pi.AdapterError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    if result.diff:
+        console.print(result.diff, highlight=False)
+    if result.wrote:
+        console.print(f"[green]wrote {result.path}[/green]")
+        console.print(
+            f'{result.agent_key} = {{"model": {json.dumps(result.model)}, '
+            f'"thinking": {json.dumps(result.thinking)}}}'
+        )
+        if result.backup_path:
+            console.print(f"[dim]backup: {result.backup_path}[/dim]")
+        _print_pi_followup()
+    else:
+        console.print("[dim]dry-run: nothing written[/dim]")
+    if verify:
+        ok, observed = pi.verify_assignment(path, name, model, effort)
+        if ok:
+            console.print(
+                f"[green]verify OK: {result.agent_key} -> "
+                f"{model}#{effort} round-trips in {path}[/green]"
+            )
+        else:
+            err_console.print(
+                f"[red]verify MISMATCH: expected {model}#{effort}, "
+                f"observed {observed!r}[/red]"
+            )
+            raise typer.Exit(code=1)
+
+
+@pi_app.command("rollback")
+def integrate_pi_rollback(
+    models: str | None = typer.Option(
+        None,
+        "--models",
+        help="Pi models.json path (default: $GENTLE_PI_CONFIG_HOME/gentle-ai/models.json "
+        "or ~/.pi/gentle-ai/models.json).",
+    ),
+) -> None:
+    """Restore the latest router backup of Pi's models file."""
+    path = pi.resolve_models_path(models)
+    restored = pi.rollback(path)
+    if restored is None:
+        err_console.print(f"[yellow]no backup found for {path}[/yellow]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]restored {path} from {restored}[/green]")
+
+
+@pi_app.command("status")
+def integrate_pi_status(
+    models: str | None = typer.Option(
+        None,
+        "--models",
+        help="Pi models.json path (default: $GENTLE_PI_CONFIG_HOME/gentle-ai/models.json "
+        "or ~/.pi/gentle-ai/models.json).",
+    ),
+) -> None:
+    """Show current per-phase assignments from Pi's models file."""
+    path = pi.resolve_models_path(models)
+    assignments = pi.read_assignments(path)
+    table = Table(title=f"pi assignments ({path})")
+    table.add_column("agent")
+    table.add_column("model")
+    table.add_column("thinking")
+    for ph in CANONICAL_PHASES:
+        entry = assignments.get(f"sdd-{ph}")
+        if entry is None:
+            continue
+        table.add_row(
+            f"sdd-{ph}",
+            str(entry.get("model") or "-"),
+            str(entry.get("thinking") or "-"),
         )
     console.print(table)
 

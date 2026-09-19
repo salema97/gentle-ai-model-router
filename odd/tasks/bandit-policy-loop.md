@@ -66,19 +66,13 @@ Commit per work unit on a feature branch.
 
 ## Tasks
 
-- [ ] **T1** — Outcome rubric: `integration/outcome.py` scoring `PHASE_SIGNALS`
-  (tests, tool_errors, escalation_count, latency) into `task_success` (0/1) and
-  `quality_score` (0–100). Pure functions, per-phase rubric table.
-- [ ] **T2** — Reward computation: `router/reward.py` joining `decisions` ↔
-  `executions` on `decision_id`; reward = f(success, total_tokens, cost, latency);
-  per-(phase, model, effort) aggregates; win-rate vs alternatives.
-- [ ] **T3** — Bandit core: `router/bandit.py` constrained UCB-style bandit over
-  (model, deployment, effort) arms within the threshold-meeting set; cold-start
-  fallback to deterministic ranking; `bandit:*` reason_codes; versioned like
-  `policy_version`.
-- [ ] **T4** — Server + CLI integration: `api/server.py` route consults bandit after
-  `rank_candidates`; new `router bandit update|report` CLI; `router feedback`
-  outcome-ingest plumbing.
+- [x] **T1** — Outcome rubric: `integration/outcome.py` ✅ 939d62b (20 tests)
+- [x] **T2** — Reward computation: `router/reward.py` ✅ 939d62b (9 tests)
+- [x] **T3** — Bandit core: `router/bandit.py` ✅ 939d62b (12 tests; cold start
+  byte-identical, deterministic UCB, floor demotion)
+- [x] **T4** — Server + CLI integration ✅ 939d62b (6 CLI tests; route fails closed
+  to prior ranking on telemetry errors; `router bandit report/update`,
+  `router feedback`)
 - [ ] **T5** — Dataset bridge: `dataset/builder.py` reads shim executions and emits
   `label_provenance=PROVENANCE_TELEMETRY` examples (schema version bump if actual
   cost/tokens/latency fields are added).
@@ -104,6 +98,5 @@ Commit per work unit on a feature branch.
 
 ## Progress log
 
-- 2026-09-19 — Feature document created; scope mapped via exploration agent
-  (policy/telemetry/adapter/dataset surface + gap analysis). Next: T1+T2+T3+T4
-  (bandit core, one writer), then T6, T7, T5, T8.
+- 2026-09-19 — T1–T4 done in work unit 939d62b (bandit core). Full suite 267
+  passed; assess risk=medium; spot check 42/42. Next: T6 Pi adapter.

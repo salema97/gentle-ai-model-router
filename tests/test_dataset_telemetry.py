@@ -457,6 +457,8 @@ def test_off_by_default_is_byte_identical(dated_session, builder_config, tmp_pat
     b = build_examples(dated_session, _design_config(tmp_path), builder_config, **kwargs)
     assert a.telemetry_stats == {}
     assert "telemetry" not in a.manifest()
+    # Bootstrap-only builds keep the v1 schema version string.
+    assert a.manifest()["feature_schema_version"] == "1"
     assert [(e.example_id, e.label_utility) for e in a.examples] == [
         (e.example_id, e.label_utility) for e in b.examples
     ]
@@ -492,6 +494,57 @@ def test_write_load_roundtrip_preserves_actuals(dated_session, builder_config, t
     assert e1.cost_features["actual_total_tokens"] == 5000.0
     assert e1.cost_features["latency_ms"] == 1200.0
     # Bootstrap rows keep only the v1 keys (None actuals are dropped on load).
+    boot = next(e for e in reloaded.examples if e.label_provenance == PROVENANCE_BOOTSTRAP)
+    assert set(boot.cost_features) == {"est_input_tokens", "est_output_tokens",
+                                       "est_total_tokens", "est_cost"}
+
+
+# --------------------------------------------------------------------------- #
+# Backward compatibility: genuine v1 artifact
+# --------------------------------------------------------------------------- #
+
+
+def test_v1_artifact_loads_unchanged(dated_session, builder_config, tmp_path) -> None:
+    """A hand-downgraded v1 dataset (no actual_* keys, version '1') must load."""
+    dataset = build_examples(
+        dated_session, _design_config(tmp_path), builder_config,
+        store=SnapshotStore(tmp_path / "data" / "snapshots"),
+    )
+    out_dir = write_dataset(dataset, tmp_path / "data", builder=builder_config)
+
+    # Downgrade the artifact to a genuine v1 shape: strip any actual_* keys
+    # and pin the manifest version to "1". Handles parquet (default when
+    # pyarrow is installed) and the JSONL fallback.
+    examples_file = out_dir / "examples.parquet"
+    if examples_file.exists():
+        import pyarrow.parquet as pq
+
+        rows = pq.read_table(examples_file).to_pylist()
+        for row in rows:
+            for key in ("actual_input_tokens", "actual_output_tokens",
+                        "actual_total_tokens", "actual_cost", "latency_ms"):
+                row["cost_features"].pop(key, None)
+        pq.write_table(
+            __import__("pyarrow").Table.from_pylist(rows), examples_file
+        )
+    else:
+        rows = [
+            json.loads(line)
+            for line in (out_dir / "examples.jsonl").read_text().splitlines()
+        ]
+        for row in rows:
+            for key in ("actual_input_tokens", "actual_output_tokens",
+                        "actual_total_tokens", "actual_cost", "latency_ms"):
+                row["cost_features"].pop(key, None)
+        (out_dir / "examples.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+        )
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    manifest["feature_schema_version"] = "1"
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    reloaded = load_dataset(out_dir)
+    assert len(reloaded.examples) == len(dataset.examples)
     boot = next(e for e in reloaded.examples if e.label_provenance == PROVENANCE_BOOTSTRAP)
     assert set(boot.cost_features) == {"est_input_tokens", "est_output_tokens",
                                        "est_total_tokens", "est_cost"}

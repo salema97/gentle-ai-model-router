@@ -41,7 +41,6 @@ from sqlalchemy.orm import Session
 from gentle_ai_model_router.collector.routing_benchmarks import map_task_to_phase
 from gentle_ai_model_router.collector.snapshots import SnapshotStore
 from gentle_ai_model_router.dataset.schema import (
-    FEATURE_SCHEMA_VERSION,
     MODEL_FEATURE_NAMES,
     PROVENANCE_BOOTSTRAP,
     PROVENANCE_EMPIRICAL,
@@ -1284,7 +1283,6 @@ def write_dataset(
 
     manifest = dataset.manifest()
     manifest["format"] = format_used
-    manifest["feature_schema_version"] = FEATURE_SCHEMA_VERSION
     if builder is not None:
         manifest["threshold_penalty"] = builder.threshold_penalty
         manifest["hard_threshold"] = builder.hard_threshold

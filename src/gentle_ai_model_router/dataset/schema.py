@@ -147,9 +147,13 @@ class DatasetV1:
         else:
             label_prov = "+".join(provenances)
 
+        emitted_telemetry = bool(self.telemetry_stats.get("emitted"))
         manifest = {
             "dataset_version": self.version,
-            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            # Schema v2 key set only materializes when telemetry rows with
+            # actual_* measurements were emitted; bootstrap-only datasets
+            # keep the v1 version string so consumers can rely on it.
+            "feature_schema_version": FEATURE_SCHEMA_VERSION if emitted_telemetry else "1",
             "normalization_version": NORMALIZATION_VERSION,
             "name": self.name,
             "source_snapshot_ids": sorted(self.source_snapshot_ids),

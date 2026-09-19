@@ -1,4 +1,4 @@
-"""Training loop for the DeBERTa ranker (HF Trainer).
+"""Training loop for the ModernBERT ranker (HF Trainer).
 
 Objectives (docs/training.md):
 - ``pointwise``: MSE between the scalar score and the bootstrap utility.
@@ -13,7 +13,7 @@ Objectives (docs/training.md):
 
 Determinism: seeds fixed for python/numpy/torch; HF Trainer runs with the
 given seed. Checkpoints are versioned directories
-(``models/deberta-router/v<N>/``) carrying model + tokenizer + config +
+(``models/modernbert-router/v<N>/``) carrying model + tokenizer + config +
 metrics + full provenance (dataset version, feature schema, snapshots, git).
 """
 

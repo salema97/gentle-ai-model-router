@@ -161,7 +161,7 @@ def test_cli_train_requires_train_extra_or_runs(tmp_path) -> None:
         ],
     )
     if has_train:  # pragma: no cover - depends on local env
-        # A real `router train` smoke run would need the deberta-v3-base
+        # A real `router train` smoke run would need the ModernBERT
         # tokenizer from Hugging Face — downloads are forbidden in tests.
         pytest.skip("full train smoke run requires an HF download")
     assert result.exit_code == 2

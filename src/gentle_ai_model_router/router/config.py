@@ -201,7 +201,7 @@ class ShimConfig(BaseModel):
 
 
 class TrainingConfig(BaseModel):
-    """DeBERTa ranker training settings (docs/training.md).
+    """ModernBERT ranker training settings (docs/training.md).
 
     Heavy dependencies (torch/transformers) are imported lazily inside
     training/ — the base install never needs them.
@@ -209,7 +209,7 @@ class TrainingConfig(BaseModel):
 
     model_name: str = "answerdotai/ModernBERT-base"
     objective: str = "pointwise"  # pointwise | pairwise (listwise: future work)
-    output_dir: str = "models/deberta-router"
+    output_dir: str = "models/modernbert-router"
     learning_rate: float = 2e-5
     epochs: float = 2.0
     batch_size: int = 8

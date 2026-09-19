@@ -1,6 +1,6 @@
 """Deterministic prior-weighted heuristic policy.
 
-This is the BASELINE the learned DeBERTa router must beat. It is fully
+This is the BASELINE the learned ModernBERT router must beat. It is fully
 deterministic: no randomness, stable tie-breaking by canonical id, and a
 policy version hash that fingerprints the exact configuration used.
 

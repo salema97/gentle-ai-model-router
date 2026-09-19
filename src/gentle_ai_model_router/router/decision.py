@@ -2,7 +2,7 @@
 
 The decision is the contract surface between the router and its consumers
 (the OpenCode write adapter, the telemetry shim, and later the learned
-DeBERTa ranker that must beat this baseline).
+ModernBERT ranker that must beat this baseline).
 """
 
 from __future__ import annotations

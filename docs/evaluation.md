@@ -69,7 +69,7 @@ router evaluate --dataset data/datasets/router-priors/v1 \
 
 # Full comparison against a trained checkpoint ([train] extra required)
 router evaluate --dataset data/datasets/router-priors/v1 \
-  --checkpoint models/deberta-router/v1 --output metrics.json
+  --checkpoint models/modernbert-router/v1 --output metrics.json
 ```
 
 Output: rich tables to stdout + `metrics.json` with per-split, per-router

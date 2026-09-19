@@ -184,11 +184,12 @@ def test_cli_export_onnx(tmp_path: Path) -> None:
     assert (out_dir / "model.onnx").exists()
     assert (out_dir / "model.quant.onnx").exists()
 
-
 def test_v9_checkpoint_onnx_ranker_if_available() -> None:
-    v9_path = Path("models/deberta-router/v9")
+    v9_path = Path("models/modernbert-router/v9")
+    if not v9_path.exists():
+        v9_path = Path("models/deberta-router/v9")
     if not (v9_path / "model.onnx").exists():
-        pytest.skip("models/deberta-router/v9 not present")
+        pytest.skip("models/modernbert-router/v9 not present")
 
     ranker = OnnxRanker(v9_path, use_quantized=True)
     assert ranker.session is not None

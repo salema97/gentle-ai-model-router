@@ -397,7 +397,9 @@ def serve(
     shim_store.init_schema()
 
     ranker_instance: Any | None = None
-    default_onnx = Path("models/deberta-router/v9/model.quant.onnx")
+    default_onnx = Path("models/modernbert-router/v9/model.quant.onnx")
+    if not default_onnx.exists():
+        default_onnx = Path("models/deberta-router/v9/model.quant.onnx")
     if ranker is not None:
         from gentle_ai_model_router.training.onnx_export import OnnxRanker
 
@@ -928,7 +930,7 @@ def shim_ingest(
 
 
 # --------------------------------------------------------------------------- #
-# Phase 2: dataset builder + DeBERTa ranker + offline evaluation + escalation
+# Phase 2: dataset builder + ModernBERT ranker + offline evaluation + escalation
 # --------------------------------------------------------------------------- #
 
 
@@ -1040,7 +1042,7 @@ def train(
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
 ) -> None:
-    """Train the DeBERTa ranker (requires: pip install .[train])."""
+    """Train the ModernBERT ranker (requires: pip install .[train])."""
     from gentle_ai_model_router.training.train import train as run_training
 
     config, _ = _load_ctx(config_path, data_dir)
@@ -1221,7 +1223,7 @@ def _print_promotion_comparison(comparison: Any, *, dry_run: bool) -> None:
 @app.command()
 def promote(
     candidate: str | None = typer.Option(
-        None, "--candidate", help="Candidate checkpoint dir (models/deberta-router/v<N>)."
+        None, "--candidate", help="Candidate checkpoint dir (models/modernbert-router/v<N>)."
     ),
     dataset: str | None = typer.Option(
         None, "--dataset", help="Re-evaluate the candidate on this dataset before comparing."

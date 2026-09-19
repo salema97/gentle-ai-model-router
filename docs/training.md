@@ -62,10 +62,10 @@ router train --dataset data/datasets/router-priors/v1 --objective pairwise
 
 # 3. Evaluate against references
 router evaluate --dataset data/datasets/router-priors/v1 \
-  --checkpoint models/deberta-router/v1
+  --checkpoint models/modernbert-router/v1
 ```
 
-Checkpoints land in `models/deberta-router/v<N>/` with `config.json`,
+Checkpoints land in `models/modernbert-router/v<N>/` with `config.json`,
 `metrics.json`, model + tokenizer, feature schema version, dataset version,
 normalization version, source snapshot ids, git commit and timestamp.
 
@@ -78,14 +78,14 @@ normalization version, source snapshot ids, git commit and timestamp.
 
 ```bash
 # Candidate already carries an "eval" section in metrics.json:
-router promote --candidate models/deberta-router/v2
+router promote --candidate models/modernbert-router/v2
 
 # Or evaluate fresh on a dataset first (requires: uv sync --extra train):
-router promote --candidate models/deberta-router/v2 \
+router promote --candidate models/modernbert-router/v2 \
   --dataset data/datasets/router-priors/v1
 
 # Decide and print the comparison, write nothing:
-router promote --candidate models/deberta-router/v2 --dry-run
+router promote --candidate models/modernbert-router/v2 --dry-run
 
 # Show the currently promoted checkpoint (or "none"):
 router promote --status

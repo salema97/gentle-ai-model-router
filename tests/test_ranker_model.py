@@ -1,4 +1,4 @@
-"""DeBERTa ranker model tests: tiny random-init config, no HF downloads.
+"""ModernBERT ranker model tests: tiny random-init config, no HF downloads.
 
 Guarded with pytest.importorskip: the base env has no [train] extra, and
 tests must never download from Hugging Face — hence the tiny local config.

@@ -198,9 +198,11 @@ def test_api_route_with_task_neural_reranking(engine, config: RouterConfig, tmp_
 
 def test_neural_rerank_with_real_onnx_ranker(engine, config: RouterConfig) -> None:
     """Test neural reranking end-to-end with the trained ONNX checkpoint."""
-    model_path = Path("models/deberta-router/v9/model.quant.onnx")
+    model_path = Path("models/modernbert-router/v9/model.quant.onnx")
     if not model_path.exists():
-        pytest.skip("ONNX checkpoint models/deberta-router/v9/model.quant.onnx not present")
+        model_path = Path("models/deberta-router/v9/model.quant.onnx")
+    if not model_path.exists():
+        pytest.skip(f"ONNX checkpoint {model_path} not present")
 
     from gentle_ai_model_router.training.onnx_export import OnnxRanker
 

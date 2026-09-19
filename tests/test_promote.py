@@ -72,11 +72,11 @@ def make_checkpoint(
     provenance: bool = True,
 ) -> Path:
     """Fake checkpoint dir with hand-written metrics.json (+ config.json)."""
-    ckpt = root / "deberta-router" / version
+    ckpt = root / "modernbert-router" / version
     ckpt.mkdir(parents=True)
     metrics: dict = {
         "objective": "pairwise",
-        "model_name": "tiny-deberta",
+        "model_name": "tiny-modernbert",
         "train_rows": 42,
         "train_loss": 0.42,
         "git_commit": "abcdef0",
@@ -306,7 +306,7 @@ def test_cli_usage_errors(tmp_path: Path) -> None:
     assert "unsupported primary metric" in result.output
     # candidate dir missing
     result = runner.invoke(
-        app, _promote_args(models_dir, models_dir / "deberta-router" / "v99")
+        app, _promote_args(models_dir, models_dir / "modernbert-router" / "v99")
     )
     assert result.exit_code == 2
 

@@ -140,9 +140,9 @@ router integrate gentle-state rollback            # or: router integrate rollbac
 ```bash
 router build_dataset --name v1 --train-end 2026-09-01
 router train --dataset data/datasets/v1
-router evaluate --dataset data/datasets/v1 --checkpoint models/deberta-router/v1
-router promote --candidate models/deberta-router/v1 --dry-run   # decide first
-router promote --candidate models/deberta-router/v1
+router evaluate --dataset data/datasets/v1 --checkpoint models/modernbert-router/v1
+router promote --candidate models/modernbert-router/v1 --dry-run   # decide first
+router promote --candidate models/modernbert-router/v1
 ```
 
 Promotion is NEVER automatic: the candidate must beat the active router on

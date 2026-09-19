@@ -19,7 +19,7 @@ personalization signal.
  collectors (Artificial Analysis, LMArena, local configs, telemetry)
       │
       ▼
- registry (Postgres / SQLite) ──► dataset builder ──► DeBERTa ranker + policy
+ registry (Postgres / SQLite) ──► dataset builder ──► ModernBERT ranker + policy
                                                           │
                                                      FastAPI /route
                                                           │
@@ -36,11 +36,11 @@ Gentle AI integration evidence: `docs/gentle-ai-integration-research.md`.
 | **0** | Research + scaffold (this repo skeleton, integration research, data-source verification) | ✅ done |
 | 1 | Collectors + registry + snapshots (Artificial Analysis, LMArena, local discovery); telemetry probe | ✅ done |
 | 2 | Dataset builder + deterministic baseline policy; OpenCode adapter (strongest config surface) | ✅ done |
-| 2b | DeBERTa ranker training + offline evaluation harness; escalation ladder (labels = bootstrap priors, NOT ground truth — see docs/training.md) | ✅ done |
+| 2b | ModernBERT ranker training + offline evaluation harness; escalation ladder (labels = bootstrap priors, NOT ground truth — see docs/training.md) | ✅ done |
 | 3 | Telemetry collector shim | ✅ done |
 | 3a | FastAPI `/route` server + policy inspection CLI (`policy`/`explain`/`export`) | ✅ done |
 | 4 | Bandit/policy loop on telemetry; Pi + Codex adapters | pending |
-| 5 | DeBERTa phase/context ranker retrained on telemetry; threshold tuning; learned-policy promotion workflow | pending |
+| 5 | ModernBERT phase/context ranker retrained on telemetry; threshold tuning; learned-policy promotion workflow | pending |
 
 ## Quickstart
 

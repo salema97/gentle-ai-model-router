@@ -128,12 +128,12 @@ integrate:
 shim:
   database_filename: "telemetry.sqlite"
 
-# DeBERTa ranker training (training/train.py). Heavy deps live in the
+# ModernBERT ranker training (training/train.py). Heavy deps live in the
 # [train] extra; these settings are consumed by `router train`.
 training:
-  model_name: "microsoft/deberta-v3-base"  # override with a tiny config in tests
-  objective: "pairwise"                     # pointwise | pairwise (listwise: future work)
-  output_dir: "models/deberta-router"
+  model_name: "answerdotai/ModernBERT-base" # override with a tiny config in tests
+  objective: "pairwise" # pointwise | pairwise (listwise: future work)
+  output_dir: "models/modernbert-router"
   learning_rate: 0.00002
   epochs: 2
   batch_size: 8

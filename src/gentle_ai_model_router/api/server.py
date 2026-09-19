@@ -25,7 +25,6 @@ from gentle_ai_model_router.registry import db as registry_db
 from gentle_ai_model_router.registry.fingerprint import registry_fingerprint
 from gentle_ai_model_router.router.bandit import (
     REASON_UCB,
-    BanditConfig,
     apply_bandit,
 )
 from gentle_ai_model_router.router.config import RouterConfig
@@ -237,7 +236,7 @@ def create_app(
                                 compute_rewards(shim_session)
                             )
                         bandit_result = apply_bandit(
-                            ranking, bandit_aggregates, BanditConfig()
+                            ranking, bandit_aggregates, config.bandit
                         )
                         if bandit_result.applied:
                             ranking = bandit_result.ranking

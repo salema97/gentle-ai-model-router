@@ -41,8 +41,7 @@ import logging
 import math
 from dataclasses import dataclass, replace
 
-from pydantic import BaseModel, Field
-
+from gentle_ai_model_router.router.config import BanditConfig
 from gentle_ai_model_router.router.policy import CandidateRanking, RankedCandidate
 from gentle_ai_model_router.router.reward import RewardAggregate
 
@@ -56,21 +55,9 @@ class BanditError(Exception):
     """Fatal bandit failure (invalid config input). Fails closed."""
 
 
-class BanditConfig(BaseModel):
-    """Constrained bandit parameters.
-
-    ``seed`` is currently unused by the deterministic UCB score; it is kept
-    in the config (and hashed into ``bandit_version``) so any future
-    randomized tie-breaking is seeded and reproducible by construction.
-    """
-
-    exploration_weight: float = 1.0
-    min_executions_before_exploit: int = 3
-    seed: int = 42
-    quality_floor: float = 0.5  # minimum success_rate to stay UCB-eligible
-    phases: dict[str, float] = Field(
-        default_factory=dict
-    )  # optional per-phase quality_floor overrides
+# BanditConfig is defined in router/config.py (owned by RouterConfig, loaded
+# from the router.yaml ``bandit:`` section) and re-exported here so the
+# historical import path ``router.bandit.BanditConfig`` keeps working.
 
 
 @dataclass(frozen=True)

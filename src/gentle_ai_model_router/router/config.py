@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_FILENAMES = ("router.yaml", "router.yaml.example")
 ENV_CONFIG_VAR = "ROUTER_CONFIG"
@@ -167,6 +167,61 @@ DEFAULT_EFFORT_TOKEN_MULTIPLIER: dict[str, float] = {
 }
 
 
+class BanditConfig(BaseModel):
+    """Constrained bandit parameters (loadable from router.yaml ``bandit:``).
+
+    Lives here (not in bandit.py) so :class:`RouterConfig` can own it without
+    an import cycle — bandit.py already imports config.py transitively via
+    policy.py. ``router.bandit`` re-exports this class; the public import
+    path is unchanged.
+
+    ``seed`` is currently unused by the deterministic UCB score; it is kept
+    in the config (and hashed into ``bandit_version``) so any future
+    randomized tie-breaking is seeded and reproducible by construction.
+
+    Fail closed: invalid values (negative exploration weight, zero cold-start
+    threshold, floors outside (0, 1]) are rejected at load time with a
+    pydantic ValidationError — never silently clamped.
+    """
+
+    exploration_weight: float = 1.0
+    min_executions_before_exploit: int = 3
+    seed: int = 42
+    quality_floor: float = 0.5  # minimum success_rate to stay UCB-eligible
+    phases: dict[str, float] = Field(
+        default_factory=dict
+    )  # optional per-phase quality_floor overrides
+
+    @field_validator("exploration_weight")
+    @classmethod
+    def _exploration_weight_non_negative(cls, value: float) -> float:
+        if value < 0.0:
+            raise ValueError(f"exploration_weight must be >= 0, got {value}")
+        return value
+
+    @field_validator("min_executions_before_exploit")
+    @classmethod
+    def _min_executions_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"min_executions_before_exploit must be >= 1, got {value}")
+        return value
+
+    @field_validator("quality_floor")
+    @classmethod
+    def _quality_floor_in_unit_interval(cls, value: float) -> float:
+        if not 0.0 < value <= 1.0:
+            raise ValueError(f"quality_floor must be in (0, 1], got {value}")
+        return value
+
+    @field_validator("phases")
+    @classmethod
+    def _per_phase_floors_in_unit_interval(cls, value: dict[str, float]) -> dict[str, float]:
+        for phase, floor in value.items():
+            if not 0.0 < floor <= 1.0:
+                raise ValueError(f"bandit.phases[{phase!r}] must be in (0, 1], got {floor}")
+        return value
+
+
 class PhaseConfig(BaseModel):
     """Per-phase policy: quality floor + benchmark prior weights.
 
@@ -259,6 +314,7 @@ class RouterConfig(BaseModel):
     phase_thresholds: dict[str, dict[str, Any]] = Field(default_factory=dict)
     phases: dict[str, PhaseConfig] = Field(default_factory=dict)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    bandit: BanditConfig = Field(default_factory=BanditConfig)
     integrate: IntegrateConfig = Field(default_factory=IntegrateConfig)
     shim: ShimConfig = Field(default_factory=ShimConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)

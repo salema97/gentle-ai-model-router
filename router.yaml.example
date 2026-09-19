@@ -124,6 +124,17 @@ integrate:
   variants_cache_v2_dir: "~/.gentle-ai/cache/opencode-v2"
   backup: true               # write <path>.router-backup-<ts> before first write
 
+# Constrained bandit over shim rewards (router/bandit.py). Consumed by the
+# /route bandit consult and by `router thresholds` (its evidence bar doubles
+# as the tuner's min_executions). Invalid values fail closed at load time.
+bandit:
+  exploration_weight: 1.0      # UCB bonus multiplier (>= 0)
+  min_executions_before_exploit: 3  # per-phase cold-start bar (>= 1)
+  seed: 42                     # reserved for seeded tie-breaking
+  quality_floor: 0.5           # minimum success_rate to stay UCB-eligible
+  # phases:                    # optional per-phase quality_floor overrides
+  #   apply: 0.9
+
 # Telemetry shim (integration/telemetry_shim.py): local-only store.
 shim:
   database_filename: "telemetry.sqlite"

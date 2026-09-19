@@ -43,7 +43,7 @@ from gentle_ai_model_router.integration import telemetry_shim
 from gentle_ai_model_router.integration.outcome import apply_outcomes
 from gentle_ai_model_router.registry import db as registry_db
 from gentle_ai_model_router.registry.normalize import Effort
-from gentle_ai_model_router.router.bandit import BanditConfig, bandit_version
+from gentle_ai_model_router.router.bandit import bandit_version
 from gentle_ai_model_router.router.config import RouterConfig, load_config
 from gentle_ai_model_router.router.decision import CANONICAL_PHASES, TaskContext
 from gentle_ai_model_router.router.policy import (
@@ -70,11 +70,16 @@ gentle_state_app = typer.Typer(
 )
 shim_app = typer.Typer(help="Telemetry shim ingestion.", no_args_is_help=True)
 bandit_app = typer.Typer(help="Bandit reward loop: report + outcome update.", no_args_is_help=True)
+thresholds_app = typer.Typer(
+    help="Telemetry-driven threshold tuning: propose + explicit router.yaml apply.",
+    no_args_is_help=True,
+)
 app.add_typer(snapshots_app, name="snapshots")
 app.add_typer(registry_app, name="registry")
 app.add_typer(integrate_app, name="integrate")
 app.add_typer(shim_app, name="shim")
 app.add_typer(bandit_app, name="bandit")
+app.add_typer(thresholds_app, name="thresholds")
 integrate_app.add_typer(gentle_state_app, name="gentle-state")
 pi_app = typer.Typer(
     help="Write sdd-<phase> model assignments into Pi's models.json "
@@ -1370,7 +1375,7 @@ def bandit_report(
     if not aggregates:
         console.print("no reward data (cold start: the bandit falls back to rank_candidates)")
         return
-    table = Table(title=f"bandit reward aggregates ({bandit_version(BanditConfig())})")
+    table = Table(title=f"bandit reward aggregates ({bandit_version(config.bandit)})")
     for column in (
         "phase", "model", "effort", "executions", "success", "mean reward",
         "mean tokens", "tokens/success", "win rate",
@@ -1416,7 +1421,7 @@ def bandit_update(
         counts = apply_outcomes(session, phase=phase)
     table = Table(title="bandit update")
     table.add_row("outcomes_scored", str(counts["scored"]))
-    table.add_row("bandit_version", bandit_version(BanditConfig()))
+    table.add_row("bandit_version", bandit_version(config.bandit))
     console.print(table)
 
 
@@ -1443,10 +1448,154 @@ def feedback(
             {
                 "ingested": ingest_counts,
                 "outcomes": outcome_counts,
-                "bandit_version": bandit_version(BanditConfig()),
+                "bandit_version": bandit_version(config.bandit),
             }
         )
     )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5: telemetry-driven threshold tuning (pure tuner + explicit applier)
+# --------------------------------------------------------------------------- #
+
+
+def _threshold_proposals(
+    config: RouterConfig,
+    db: str | None,
+    phase: str | None,
+    success_floor: float,
+) -> list:
+    """Compute tuner proposals from the shim store (shared by propose/apply)."""
+    from gentle_ai_model_router.router.policy import normalize_phase
+    from gentle_ai_model_router.router.threshold_tune import propose_thresholds
+
+    store = _open_shim(config, db)
+    try:
+        with store.session() as session:
+            aggregates = aggregate_rewards(compute_rewards(session))
+    except RewardError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    grouped: dict[str, list] = {}
+    for agg in aggregates:
+        grouped.setdefault(agg.phase.removeprefix("sdd-"), []).append(agg)
+    if phase is not None:
+        try:
+            name = normalize_phase(phase)
+        except PolicyError as exc:
+            err_console.print(f"[red]error: {exc}[/red]")
+            raise typer.Exit(code=2) from exc
+        grouped = {name: grouped.get(name, [])}
+    return propose_thresholds(grouped, success_floor=success_floor, config=config)
+
+
+@thresholds_app.command("propose")
+def thresholds_propose(
+    phase: str | None = typer.Option(
+        None, "--phase", help="One SDD phase (default: every phase with telemetry)."
+    ),
+    success_floor: float = typer.Option(
+        0.8, "--success-floor", help="Minimum pooled success rate to admit an effort level."
+    ),
+    db: str | None = typer.Option(None, "--db", help="Telemetry SQLite path override."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Propose per-phase threshold_quality values from measured rewards (read-only).
+
+    For each phase, the cheapest effort level whose pooled success rate meets
+    --success-floor with at least bandit.min_executions_before_exploit
+    executions defines the proposal; the proposed value is the policy's own
+    quality curve applied to that measured success rate. Phases below the
+    evidence bar are reported as insufficient_evidence and never changed.
+    Prints the proposals as JSON; writes nothing.
+    """
+    from dataclasses import asdict
+
+    from gentle_ai_model_router.router.threshold_tune import ThresholdTuneError
+
+    config, _ = _load_ctx(config_path, data_dir)
+    try:
+        proposals = _threshold_proposals(config, db, phase, success_floor)
+    except ThresholdTuneError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    # Plain print: the JSON payload must survive piping unwrapped/unmangled.
+    print(json.dumps([asdict(p) for p in proposals], indent=2))
+
+
+def _resolve_router_yaml(config_path: str | None) -> Path:
+    """The real router.yaml to edit — never the bundled example fallback."""
+    from gentle_ai_model_router.router.config import find_config_file
+
+    path = find_config_file(config_path)
+    if path is None or path.name == "router.yaml.example":
+        err_console.print(
+            "[red]error: no router.yaml found (pass --config <path>); "
+            "refusing to edit the bundled example[/red]"
+        )
+        raise typer.Exit(code=2)
+    return path
+
+
+@thresholds_app.command("apply")
+def thresholds_apply(
+    phase: str | None = typer.Option(
+        None, "--phase", help="One SDD phase (default: every phase with proposals)."
+    ),
+    success_floor: float = typer.Option(
+        0.8, "--success-floor", help="Minimum pooled success rate to admit an effort level."
+    ),
+    db: str | None = typer.Option(None, "--db", help="Telemetry SQLite path override."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the diff, write nothing."),
+    create: bool = typer.Option(
+        False, "--create", help="Add phases missing from router.yaml instead of refusing."
+    ),
+) -> None:
+    """Apply upgrade/downgrade threshold proposals to router.yaml (explicit write).
+
+    Edits ONLY ``phases.<name>.threshold_quality`` for phases whose proposal
+    carries sufficient evidence (kind=upgrade/downgrade); uphold and
+    insufficient_evidence proposals are reported as skipped and never touch
+    the file. Phases absent from router.yaml are refused unless --create.
+    The write is backup-first (router.yaml.router-backup-<ts>) and atomic
+    (tmp + os.replace). Always propose with ``thresholds propose`` first.
+    """
+    from gentle_ai_model_router.integration.router_yaml_adapter import (
+        RouterYamlError,
+        apply_threshold_proposals,
+    )
+    from gentle_ai_model_router.router.threshold_tune import ThresholdTuneError
+
+    config, _ = _load_ctx(config_path, data_dir)
+    try:
+        proposals = _threshold_proposals(config, db, phase, success_floor)
+    except ThresholdTuneError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    path = _resolve_router_yaml(config_path)
+    try:
+        result = apply_threshold_proposals(path, proposals, create=create, dry_run=dry_run)
+    except RouterYamlError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    if result.diff:
+        console.print(result.diff, highlight=False)
+    for name, (old, new) in result.applied.items():
+        console.print(f"[green]applied {name}: {old:.3f} -> {new:.3f}[/green]")
+    for name, reason in result.skipped.items():
+        err_console.print(f"[yellow]skipped {name}: {reason}[/yellow]")
+    if result.wrote:
+        console.print(f"[green]wrote {result.path}[/green]")
+        if result.backup_path:
+            console.print(f"[dim]backup: {result.backup_path}[/dim]")
+    else:
+        console.print("[dim]dry-run: nothing written[/dim]")
 
 
 # --------------------------------------------------------------------------- #

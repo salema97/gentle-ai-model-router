@@ -1,16 +1,21 @@
 # Training the ModernBERT ranker
 
-> ## ⚠ BOOTSTRAP-LABEL WARNING
+> ## ⚠ LABEL PROVENANCE & BOOTSTRAP WARNING
 >
-> **Every label in the current datasets is a `bootstrap_prior`, NOT ground
-> truth.** They are computed from external benchmark data (Artificial
+> In cold-start datasets without telemetry, every label is a `bootstrap_prior`,
+> NOT ground truth. They are computed from external benchmark data (Artificial
 > Analysis, LMArena) through the same quality model as `router/policy.py`.
-> There is (almost) no real execution telemetry yet. A ranker trained on
-> these labels learns the *deterministic policy's opinion of the priors* —
-> useful to validate the training pipeline and compare architectures, but
-> the resulting model must NOT be trusted for production routing until
-> telemetry-derived labels (`label_provenance="telemetry"`) replace the
-> priors. The same warning ships in every `manifest.json`.
+>
+> With Phase 5, the retrain loop consumes real execution telemetry or bootstrap
+> telemetry seeded from empirical benchmarks (`router shim seed --dataset ...`).
+> The dataset, checkpoint, and evaluation harness report the **true provenance**
+> via `derive_label_provenance`:
+> - **Pure bootstrap**: `bootstrap_prior`
+> - **Mixed**: `bootstrap_prior+telemetry` or `bootstrap_prior+empirical_benchmark+telemetry`
+> - **Pure telemetry**: `telemetry`
+>
+> The exact provenance string is recorded in `manifest.json`, checkpoint `metrics.json`,
+> and evaluation results docs.
 
 ## Objective
 
@@ -35,9 +40,27 @@ set.
 
 | Objective | Loss | When |
 |---|---|---|
-| `pointwise` | MSE(score, utility) | Simple baseline; scores stay interpretable. |
+| `pointwise` | MSE(score, utility) with `telemetry_weight` | Simple baseline; scores stay interpretable. Telemetry loss weighting allows upweighting real execution rows over bootstrap priors. |
 | `pairwise` (default) | BCE-with-logits on `s_a − s_b` | **Preferred while labels are noisy priors**: only the order matters, not the exact utility gap. Pairs are margin-filtered (default 0.05), so the model trains on confident orderings only. |
 | `listwise` | future work | The dataset builder already emits full candidate lists per task group, but listwise losses are less robust to label noise. Revisit once telemetry labels exist. |
+
+### Telemetry loss weighting (`telemetry_weight`)
+
+In pointwise training, `TrainingConfig.telemetry_weight` (CLI `--telemetry-weight`, default 1.0)
+multiplies the MSE loss contribution of `label_provenance='telemetry'` examples.
+- Setting `--telemetry-weight > 1.0` prioritizes measured execution feedback over benchmark priors.
+- When `telemetry_weight == 1.0` (or when no telemetry examples exist), the loss computation
+  is byte-identical to standard unweighted MSE.
+
+## Evaluation with measured token accounting
+
+Offline evaluation (`training/evaluate.py`) computes ranking and business metrics across
+held-out splits (`test`, `temporal_test`, `validation`):
+- **Measured token counts**: Telemetry rows carry `actual_total_tokens` (measured).
+  Business metrics (`tokens_per_task`, `tokens_per_success`) use `actual_total_tokens`
+  whenever available, falling back to `est_total_tokens` for bootstrap rows.
+- **Mix accounting**: Evaluator documents count `measured_token_rows` and `estimated_token_rows`
+  alongside the dataset's `label_provenance`.
 
 ## Determinism & seeds
 
@@ -53,74 +76,82 @@ default `model_name` is `answerdotai/ModernBERT-base`.
 ## Commands
 
 ```bash
-# 1. Build a dataset (labels are bootstrap priors — see warning above)
-router build-dataset --name router-priors \
-  --train-end 2026-08-01 --val-end 2026-09-01
+# 1. Build a dataset with telemetry enabled
+router build-dataset --name router-telemetry \
+  --train-end 2026-08-01 --val-end 2026-09-01 \
+  --telemetry-db data/telemetry.sqlite
 
-# 2. Train (requires: uv sync --extra train)
-router train --dataset data/datasets/router-priors/v1 --objective pairwise
+# 2. Train with telemetry loss weighting (requires: uv sync --extra train)
+router train --dataset data/datasets/router-telemetry/v1 \
+  --objective pointwise --telemetry-weight 2.0
 
 # 3. Evaluate against references
-router evaluate --dataset data/datasets/router-priors/v1 \
+router evaluate --dataset data/datasets/router-telemetry/v1 \
   --checkpoint models/modernbert-router/v1
 ```
 
 Checkpoints land in `models/modernbert-router/v<N>/` with `config.json`,
 `metrics.json`, model + tokenizer, feature schema version, dataset version,
-normalization version, source snapshot ids, git commit and timestamp.
+normalization version, source snapshot ids, truthful `label_provenance`, git commit, and timestamp.
 
-## Promotion workflow
+## Promotion workflow: checkpoints & thresholds
 
-> **NEVER auto-replace the active router.** Training a new checkpoint changes
-> nothing in production. Promotion is an explicit, audited decision:
-> **candidate → evaluate → compare → promote (only if it improves the defined
-> metric set).**
+> **NEVER auto-replace the active router.** Training a new checkpoint or proposing
+> new thresholds changes nothing in production. Promotion is an explicit, audited decision:
+> **candidate / proposals → evaluate / filter → compare → promote.**
+
+Promotion supports two distinct artifact kinds (`checkpoint` and `thresholds`)
+recorded in `models/promoted/promoted.json`.
 
 ```bash
-# Candidate already carries an "eval" section in metrics.json:
+# Candidate checkpoint with an "eval" section in metrics.json:
 router promote --candidate models/modernbert-router/v2
 
 # Or evaluate fresh on a dataset first (requires: uv sync --extra train):
 router promote --candidate models/modernbert-router/v2 \
-  --dataset data/datasets/router-priors/v1
+  --dataset data/datasets/router-telemetry/v1
 
 # Decide and print the comparison, write nothing:
 router promote --candidate models/modernbert-router/v2 --dry-run
 
-# Show the currently promoted checkpoint (or "none"):
+# Promote an evidence-backed thresholds proposal artifact:
+router promote --thresholds proposals.json
+
+# Show the currently promoted artifact (checkpoint or thresholds):
 router promote --status
 ```
 
 Rules enforced by `training/promote.py`:
 
-1. **Provenance gate.** The candidate's `metrics.json` must carry
-   `dataset.version`, `source_snapshot_ids` and `label_provenance`; otherwise
+1. **Provenance gate.** A candidate checkpoint's `metrics.json` must carry
+   `dataset.version`, `source_snapshot_ids`, and `label_provenance`; otherwise
    promotion is refused (exit 2). An untraceable checkpoint must never route
    production traffic.
 2. **Eval gate.** Without `--dataset`, the checkpoint must already contain an
    `eval` section with per-split metrics in the shape `training/evaluate.py`
    produces. Train loss alone is NEVER a promotion criterion.
-3. **Comparison.** Primary metric: `tokens_per_success` (lower is better) on
+3. **Comparison (Checkpoints).** Primary metric: `tokens_per_success` (lower is better) on
    the newest available evaluated split (`temporal_test` > `test` >
    `validation`). **Guardrails**: `success_rate` and `mean_quality` must not
-   regress beyond `--epsilon` (absolute, default 0.02). Guardrails exist
-   because the primary metric only counts tokens *per success*: a router that
-   silently routes easy tasks could look cheaper while failing more often —
-   the guardrails bound exactly that failure mode. Ranking metrics
+   regress beyond `--epsilon` (absolute, default 0.02). Ranking metrics
    (`ndcg@5`, `mrr`) are reported as information but do not gate promotion.
-4. **Decision.** Promote only if the primary improves AND guardrails hold.
+4. **Evidence (Thresholds).** Proposals from `router thresholds propose` carry
+   measured sample counts and empirical success rates. Only applyable kinds (`upgrade`,
+   `downgrade`) are retained in the promotion record.
+5. **Decision & Record.** Promote only if the primary improves AND guardrails hold.
    First promotion (nothing promoted yet) always promotes when eval metrics
    exist. A `KEEP` decision leaves the current router active (exit 1); usage
    and validation errors exit 2.
 
-On promotion, `models/promoted/` (created on demand; `models/` is gitignored)
-receives an atomic (tmp + rename) write of:
-
-- `promoted.json` — `{promoted_checkpoint, metrics_path, promotion_reason,
+On promotion, `models/promoted/` receives an atomic write of:
+- `promoted.json` — `{artifact_kind, promoted_checkpoint | thresholds, metrics_path | evidence,
   promoted_at, git_commit, promoted_by: "manual"}`;
-- `metrics.json` — a full **copy** of the promoted checkpoint's `metrics.json`
-  (chosen over a pointer so the record stays self-contained even if the
-  checkpoint dir is later deleted or moved).
+- `metrics.json` — a full copy of the promoted checkpoint's metrics (for checkpoint promotions).
 
-Every promotion is therefore reproducible: the record says which checkpoint,
-which metrics, why, when, at which commit, and by whom.
+### Serving honoring promoted artifacts
+
+When running `router serve`, the server checks `models/promoted/promoted.json`:
+- For `artifact_kind: "checkpoint"`, it automatically resolves and loads `model.quant.onnx`
+  (falling back to `model.onnx`) from the promoted checkpoint directory without requiring
+  manual `--ranker` CLI flags.
+- If the promotion record points to a missing artifact, `router serve` fails closed with exit 2.

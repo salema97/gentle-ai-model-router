@@ -50,25 +50,25 @@ train.py), changing the bandit's UCB algorithm.
 
 ## Tasks
 
-- [ ] **R1** — Shim seeding from empirical observations: CLI `router shim
+- [x] **R1** — Shim seeding from empirical observations: CLI `router shim
   seed --dataset <path>` converting empirical-provenance dataset examples
   into scored execution records (measured quality → outcome rubric inputs),
   stamped as bootstrap (`router_version: empirical-bootstrap`).
-- [ ] **R2** — Training provenance fixes: derive `label_provenance` in
+- [x] **R2** — Training provenance fixes: derive `label_provenance` in
   `train.py` metrics + `evaluate.py` results from the dataset instead of
   hardcoded `bootstrap_prior`; eval metric branch using
   `actual_total_tokens` for telemetry rows (measured tokens_per_success).
-- [ ] **R3** — Provenance weighting: `TrainingConfig.telemetry_weight` to
+- [x] **R3** — Provenance weighting: `TrainingConfig.telemetry_weight` to
   upweight telemetry rows in the pointwise objective.
-- [ ] **R4** — Threshold tuning: pure `router/threshold_tune.py` over
+- [x] **R4** — Threshold tuning: pure `router/threshold_tune.py` over
   RewardAggregates (cheapest-effort frontier meeting a success-rate floor
   per phase) + explicit `router thresholds apply` writing router.yaml
   backup-first/atomic. Wire BanditConfig from RouterConfig while touching
   this.
-- [ ] **R5** — Promotion workflow: generalize `models/promoted/promoted.json`
+- [x] **R5** — Promotion workflow: generalize `models/promoted/promoted.json`
   to artifact kinds (checkpoint | thresholds); `router serve` honors the
   promotion record instead of the hardcoded v9 path.
-- [ ] **R6** — End-to-end verification: seed shim → build-dataset with
+- [x] **R6** — End-to-end verification: seed shim → build-dataset with
   telemetry → retrain tiny → evaluate → promote --dry-run, all scripted in a
   test; docs (README roadmap, runbook, training.md).
 

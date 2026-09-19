@@ -214,7 +214,7 @@ class ArtificialAnalysisCollector:
         max_age = max_age_hours if max_age_hours is not None else self.config.cache_ttl_hours
 
         if not force:
-            fresh = self.store.latest_fresh(SOURCE_NAME, max_age)
+            fresh = self.store.latest_fresh(SOURCE_NAME, max_age, now=now)
             if fresh is not None:
                 logger.info(
                     "collect source=%s served_from_cache snapshot_id=%s age_ok=%sh",

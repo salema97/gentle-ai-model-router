@@ -190,12 +190,15 @@ class SnapshotStore:
         except (json.JSONDecodeError, KeyError, ValueError, OSError):
             return None
 
-    def latest_fresh(self, source: str, max_age_hours: float) -> SnapshotRecord | None:
+    def latest_fresh(
+        self, source: str, max_age_hours: float, now: datetime | None = None
+    ) -> SnapshotRecord | None:
         """Return the latest snapshot if younger than ``max_age_hours``, else None."""
         record = self.latest_record(source)
         if record is None:
             return None
-        age = datetime.now(tz=UTC) - record.fetched_at.astimezone(UTC)
+        current = (now or datetime.now(tz=UTC)).astimezone(UTC)
+        age = current - record.fetched_at.astimezone(UTC)
         return record if age.total_seconds() < max_age_hours * 3600 else None
 
 

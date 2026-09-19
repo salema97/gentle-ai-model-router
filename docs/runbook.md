@@ -136,7 +136,89 @@ Every `POST /route` decision is persisted with reason codes — the "why this
 model?" receipt. Correlate these with outcomes before trusting any learned
 checkpoint (labels from priors are bootstrap-quality, not ground truth).
 
-## 6. Rollback + full deactivation
+## 6. Retrain on telemetry + threshold tuning (Phase 5)
+
+When bootstrapping on a fresh environment where `data/telemetry.sqlite` has
+no live executions, seed the shim from empirical benchmark observations:
+
+### 6a. Seeding bootstrap telemetry from empirical benchmark datasets
+
+```bash
+# Seed the shim store with empirical observations stamped router_version: empirical-bootstrap
+router shim seed --dataset data/datasets/router-priors/v1
+```
+
+This extracts `label_provenance='empirical_benchmark'` rows from pre-built datasets,
+creates corresponding `DecisionRecord` and `ExecutionRecord` entries stamped
+`router_version: "empirical-bootstrap"`, and maps benchmark quality to execution outcomes
+via the rubric validation gate.
+
+### 6b. Building datasets with telemetry enabled
+
+```bash
+# Build dataset incorporating scored shim executions via the telemetry bridge
+router build-dataset --name v2 --train-end 2026-09-01 --telemetry-db data/telemetry.sqlite
+```
+
+The resulting dataset contains `PROVENANCE_TELEMETRY` examples with measured token counts
+(`actual_total_tokens`) and derives truthful mixed provenance
+(`derive_label_provenance` -> `"bootstrap_prior+telemetry"` or `"bootstrap_prior+empirical_benchmark+telemetry"`).
+
+### 6c. Retraining on telemetry + telemetry weighting
+
+```bash
+# Train ranker with telemetry upweighting in pointwise loss
+router train --dataset data/datasets/v2 --telemetry-weight 2.0 --objective pointwise
+```
+
+The `--telemetry-weight` flag (default 1.0) multiplies the pointwise MSE loss contribution
+for `label_provenance='telemetry'` rows, prioritizing measured outcomes over bootstrap priors.
+
+### 6d. Telemetry-driven threshold tuning
+
+```bash
+# Propose updated per-phase quality thresholds from empirical reward aggregates
+router thresholds propose --output proposals.json
+
+# Review and apply proposed thresholds to router.yaml (atomic + automatic backup)
+router thresholds apply --proposals proposals.json
+```
+
+The threshold tuner finds the cheapest effort variant meeting a minimum success floor
+(default 0.80) across phases. `thresholds apply` updates `router.yaml` using the
+standard atomic write with pre-write backup (`router.yaml.router-backup-<ts>`).
+
+## 7. Promotion workflow: checkpoints & thresholds
+
+Promotion supports two distinct artifact kinds (`checkpoint` and `thresholds`)
+via `models/promoted/promoted.json`.
+
+```bash
+# Checkpoint promotion: candidate -> evaluate -> compare -> promote
+router evaluate --dataset data/datasets/v2 --checkpoint models/modernbert-router/v2
+router promote --candidate models/modernbert-router/v2 --dry-run   # decide first
+router promote --candidate models/modernbert-router/v2
+
+# Thresholds promotion: promote evidence-backed proposal payload
+router promote --thresholds proposals.json --dry-run
+router promote --thresholds proposals.json
+
+# Inspect active promotion record
+router promote --status
+```
+
+Rules enforced by `training/promote.py`:
+- **Never auto-replace**: promotion is an explicit, audited action (`promoted_by: "manual"`).
+- **Checkpoints**: compared on `tokens_per_success` (lower is better) on the newest split
+  under epsilon guardrails on `success_rate` and `mean_quality`.
+- **Thresholds**: records phase floors with measured execution evidence (sample count and
+  success rate) from proposals.
+- **Serving honoring promoted artifacts**: `router serve` inspects `models/promoted/promoted.json`.
+  For checkpoint promotions, it resolves and loads `model.quant.onnx` (or `model.onnx` fallback)
+  from the promoted checkpoint directory without requiring manual `--ranker` CLI flags.
+  Fails closed with a clear error if the promoted artifact is missing.
+
+## 8. Rollback + full deactivation
 
 ```bash
 # undo the last write (restores the latest .router-backup-<ts>)
@@ -151,20 +233,6 @@ router integrate gentle-state rollback            # or: router integrate rollbac
 #    assignments are gone and sync re-rendered, behavior is stock.
 # 4) stale backups (*.router-backup-*) can be deleted once verified.
 ```
-
-## 7. Promote a learned checkpoint (train → evaluate → promote)
-
-```bash
-router build_dataset --name v1 --train-end 2026-09-01
-router train --dataset data/datasets/v1
-router evaluate --dataset data/datasets/v1 --checkpoint models/modernbert-router/v1
-router promote --candidate models/modernbert-router/v1 --dry-run   # decide first
-router promote --candidate models/modernbert-router/v1
-```
-
-Promotion is NEVER automatic: the candidate must beat the active router on
-`tokens_per_success` (primary, lower is better) within epsilon guardrails on
-ranking metrics. A failed comparison exits 1 and keeps the current router.
 
 ---
 

@@ -125,26 +125,35 @@ def extract_routellm_sample(row: dict[str, Any]) -> dict[str, Any] | None:
         or ""
     )
     if not model_a and not model_b:
-        return None
+        if "gpt4_response" in row or "mixtral_response" in row:
+            model_a = "mistralai/mixtral-8x7b-instruct"
+            model_b = "openai/gpt-4"
+            m_score = _safe_float(row.get("mixtral_score"), default=3.0)
+            score_a = m_score / 5.0
+            score_b = 1.0
+            winner = "model_a" if m_score >= 4.0 else "model_b"
+        else:
+            return None
+    else:
+        winner_raw = row.get("winner") or row.get("winner_model") or row.get("label") or ""
+        winner = str(winner_raw).strip().lower()
+        score_a = _safe_float(
+            row.get("score_a") if row.get("score_a") is not None else row.get("quality_a"),
+            default=0.5,
+        )
+        score_b = _safe_float(
+            row.get("score_b") if row.get("score_b") is not None else row.get("quality_b"),
+            default=0.5,
+        )
 
+    sources = row.get("source")
     task_name = str(
-        row.get("task_name")
+        (sources[0] if isinstance(sources, list) and sources else sources)
+        or row.get("task_name")
         or row.get("task")
         or row.get("benchmark")
         or row.get("category")
         or "routellm"
-    )
-
-    winner_raw = row.get("winner") or row.get("winner_model") or row.get("label") or ""
-    winner = str(winner_raw).strip().lower()
-
-    score_a = _safe_float(
-        row.get("score_a") if row.get("score_a") is not None else row.get("quality_a"),
-        default=0.5,
-    )
-    score_b = _safe_float(
-        row.get("score_b") if row.get("score_b") is not None else row.get("quality_b"),
-        default=0.5,
     )
     threshold = _safe_float(row.get("threshold") or row.get("routing_threshold"), default=0.5)
 

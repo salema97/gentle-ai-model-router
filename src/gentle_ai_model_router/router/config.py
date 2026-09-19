@@ -83,12 +83,15 @@ class RoutingBenchmarksConfig(BaseModel):
 
 
 class RouterBenchConfig(BaseModel):
-    """RouterBench dataset settings (withmartian/routerbench)."""
+    """RouterBench dataset settings (withmartian/routerbench via Parquet mirror)."""
 
     enabled: bool = True
-    dataset: str = "withmartian/routerbench"
-    split: str = "test"
-    url: str | None = None
+    dataset: str = "Wikit/RoutingCompendium-perf"
+    split: str = "train"
+    url: str | None = (
+        "https://huggingface.co/datasets/Wikit/RoutingCompendium-perf/resolve/main/"
+        "data/RouterBench-00000-of-00001.parquet"
+    )
     max_samples: int = 500
     timeout_seconds: float = 30.0
 
@@ -97,9 +100,11 @@ class RouteLLMConfig(BaseModel):
     """RouteLLM dataset settings (lm-sys/RouteLLM)."""
 
     enabled: bool = True
-    dataset: str = "lmsys/routellm-eval"
-    split: str = "test"
-    url: str | None = None
+    dataset: str = "routellm/gpt4_dataset"
+    split: str = "train"
+    url: str | None = (
+        "https://huggingface.co/datasets/routellm/gpt4_dataset/resolve/main/train.jsonl"
+    )
     max_samples: int = 500
     timeout_seconds: float = 30.0
 
@@ -110,7 +115,10 @@ class SWETracesConfig(BaseModel):
     enabled: bool = True
     dataset: str = "princeton-nlp/SWE-bench_Lite"
     split: str = "test"
-    url: str | None = None
+    url: str | None = (
+        "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Lite/resolve/main/"
+        "data/test-00000-of-00001.parquet"
+    )
     max_samples: int = 500
     timeout_seconds: float = 30.0
 

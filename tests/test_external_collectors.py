@@ -139,7 +139,7 @@ def test_routerbench_sample_extraction() -> None:
 @respx.mock
 def test_routerbench_collector_success(store: SnapshotStore) -> None:
     """Test successful RouterBench snapshot collection via HTTP JSONL."""
-    url = "https://huggingface.co/datasets/withmartian/routerbench/resolve/main/test.jsonl"
+    url = "https://example.com/routerbench.jsonl"
     payload_lines = (
         json.dumps({
             "prompt": "Sort list",
@@ -161,7 +161,7 @@ def test_routerbench_collector_success(store: SnapshotStore) -> None:
     )
     respx.get(url).mock(return_value=httpx.Response(200, text=payload_lines))
 
-    config = RouterBenchConfig()
+    config = RouterBenchConfig(url=url)
     with RouterBenchCollector(config, store) as collector:
         record = collector.collect(now=NOW)
 
@@ -231,10 +231,10 @@ def test_routerbench_collector_fallback(store: SnapshotStore) -> None:
         fetched_at=datetime(2026, 9, 18, tzinfo=UTC),
     )
 
-    url = "https://huggingface.co/datasets/withmartian/routerbench/resolve/main/test.jsonl"
+    url = "https://example.com/routerbench.jsonl"
     respx.get(url).mock(return_value=httpx.Response(500))
 
-    config = RouterBenchConfig()
+    config = RouterBenchConfig(url=url)
     with RouterBenchCollector(config, store) as collector:
         record = collector.collect(now=NOW, force=True)
 
@@ -246,10 +246,10 @@ def test_routerbench_collector_fallback(store: SnapshotStore) -> None:
 @respx.mock
 def test_routerbench_collector_no_cache_error(store: SnapshotStore) -> None:
     """Test error raised when download fails and no cached snapshot exists."""
-    url = "https://huggingface.co/datasets/withmartian/routerbench/resolve/main/test.jsonl"
+    url = "https://example.com/routerbench.jsonl"
     respx.get(url).mock(return_value=httpx.Response(502))
 
-    config = RouterBenchConfig()
+    config = RouterBenchConfig(url=url)
     with RouterBenchCollector(config, store) as collector:
         with pytest.raises(RouterBenchCollectionError):
             collector.collect(now=NOW, force=True)
@@ -328,7 +328,7 @@ def test_routellm_choice_and_noul_calibration() -> None:
 @respx.mock
 def test_routellm_collector_success(store: SnapshotStore) -> None:
     """Test successful RouteLLM snapshot collection."""
-    url = "https://huggingface.co/datasets/lmsys/routellm-eval/resolve/main/test.jsonl"
+    url = "https://example.com/routellm.jsonl"
     payload = (
         json.dumps({
             "prompt": "Compute fibonacci",
@@ -344,7 +344,7 @@ def test_routellm_collector_success(store: SnapshotStore) -> None:
     )
     respx.get(url).mock(return_value=httpx.Response(200, text=payload))
 
-    config = RouteLLMConfig()
+    config = RouteLLMConfig(url=url)
     with RouteLLMCollector(config, store) as collector:
         record = collector.collect(now=NOW)
 
@@ -368,10 +368,10 @@ def test_routellm_collector_fallback(store: SnapshotStore) -> None:
         fetched_at=datetime(2026, 9, 18, tzinfo=UTC),
     )
 
-    url = "https://huggingface.co/datasets/lmsys/routellm-eval/resolve/main/test.jsonl"
+    url = "https://example.com/routellm.jsonl"
     respx.get(url).mock(return_value=httpx.Response(500))
 
-    config = RouteLLMConfig()
+    config = RouteLLMConfig(url=url)
     with RouteLLMCollector(config, store) as collector:
         record = collector.collect(now=NOW, force=True)
 
@@ -383,10 +383,10 @@ def test_routellm_collector_fallback(store: SnapshotStore) -> None:
 @respx.mock
 def test_routellm_collector_no_cache_error(store: SnapshotStore) -> None:
     """Test error raised when RouteLLM download fails and no cached snapshot exists."""
-    url = "https://huggingface.co/datasets/lmsys/routellm-eval/resolve/main/test.jsonl"
+    url = "https://example.com/routellm.jsonl"
     respx.get(url).mock(return_value=httpx.Response(502))
 
-    config = RouteLLMConfig()
+    config = RouteLLMConfig(url=url)
     with RouteLLMCollector(config, store) as collector:
         with pytest.raises(RouteLLMCollectionError):
             collector.collect(now=NOW, force=True)
@@ -440,7 +440,7 @@ def test_swe_traces_sample_extraction() -> None:
 @respx.mock
 def test_swe_traces_collector_success(store: SnapshotStore) -> None:
     """Test successful SWE-Traces snapshot collection."""
-    url = "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Lite/resolve/main/test.jsonl"
+    url = "https://example.com/swe_traces.jsonl"
     payload = (
         json.dumps({
             "instance_id": "pytest-dev__pytest-1234",
@@ -456,7 +456,7 @@ def test_swe_traces_collector_success(store: SnapshotStore) -> None:
     )
     respx.get(url).mock(return_value=httpx.Response(200, text=payload))
 
-    config = SWETracesConfig()
+    config = SWETracesConfig(url=url)
     with SWETracesCollector(config, store) as collector:
         record = collector.collect(now=NOW)
 
@@ -477,10 +477,10 @@ def test_swe_traces_collector_fallback(store: SnapshotStore) -> None:
         fetched_at=datetime(2026, 9, 18, tzinfo=UTC),
     )
 
-    url = "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Lite/resolve/main/test.jsonl"
+    url = "https://example.com/swe_traces.jsonl"
     respx.get(url).mock(return_value=httpx.Response(503))
 
-    config = SWETracesConfig()
+    config = SWETracesConfig(url=url)
     with SWETracesCollector(config, store) as collector:
         record = collector.collect(now=NOW, force=True)
 
@@ -492,10 +492,10 @@ def test_swe_traces_collector_fallback(store: SnapshotStore) -> None:
 @respx.mock
 def test_swe_traces_collector_no_cache_error(store: SnapshotStore) -> None:
     """Test error raised when SWE-Traces download fails and no cached snapshot exists."""
-    url = "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Lite/resolve/main/test.jsonl"
+    url = "https://example.com/swe_traces.jsonl"
     respx.get(url).mock(return_value=httpx.Response(502))
 
-    config = SWETracesConfig()
+    config = SWETracesConfig(url=url)
     with SWETracesCollector(config, store) as collector:
         with pytest.raises(SWETracesCollectionError):
             collector.collect(now=NOW, force=True)
@@ -509,10 +509,18 @@ def test_swe_traces_collector_no_cache_error(store: SnapshotStore) -> None:
 @respx.mock
 def test_cli_collect_routerbench(tmp_path: Path) -> None:
     """Test CLI router collect --source routerbench."""
-    url = "https://huggingface.co/datasets/withmartian/routerbench/resolve/main/test.jsonl"
-    respx.get(url).mock(
-        return_value=httpx.Response(200, text=json.dumps({"prompt": "p", "model": "m"}) + "\n")
-    )
+    store = SnapshotStore(tmp_path)
+    config = RouterBenchConfig()
+    url = RouterBenchCollector(config, store)._resolve_url()
+    if url.endswith(".parquet"):
+        table = pa.Table.from_pydict({"prompt": ["p"], "model": ["m"], "score": [1.0]})
+        buf = io.BytesIO()
+        pq.write_table(table, buf)
+        respx.get(url).mock(return_value=httpx.Response(200, content=buf.getvalue()))
+    else:
+        respx.get(url).mock(
+            return_value=httpx.Response(200, text=json.dumps({"prompt": "p", "model": "m"}) + "\n")
+        )
     runner = CliRunner()
     result = runner.invoke(
         app,
@@ -525,7 +533,9 @@ def test_cli_collect_routerbench(tmp_path: Path) -> None:
 @respx.mock
 def test_cli_collect_routellm(tmp_path: Path) -> None:
     """Test CLI router collect --source routellm."""
-    url = "https://huggingface.co/datasets/lmsys/routellm-eval/resolve/main/test.jsonl"
+    store = SnapshotStore(tmp_path)
+    config = RouteLLMConfig()
+    url = RouteLLMCollector(config, store)._resolve_url()
     respx.get(url).mock(
         return_value=httpx.Response(
             200, text=json.dumps({"prompt": "p", "model_a": "a", "model_b": "b"}) + "\n"
@@ -543,12 +553,24 @@ def test_cli_collect_routellm(tmp_path: Path) -> None:
 @respx.mock
 def test_cli_collect_swe_traces(tmp_path: Path) -> None:
     """Test CLI router collect --source swe-traces."""
-    url = "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Lite/resolve/main/test.jsonl"
-    respx.get(url).mock(
-        return_value=httpx.Response(
-            200, text=json.dumps({"instance_id": "i1", "problem_statement": "p"}) + "\n"
+    store = SnapshotStore(tmp_path)
+    config = SWETracesConfig()
+    url = SWETracesCollector(config, store)._resolve_url()
+    if url.endswith(".parquet"):
+        table = pa.Table.from_pydict({
+            "instance_id": ["i1"],
+            "problem_statement": ["p"],
+            "patch": ["diff"],
+        })
+        buf = io.BytesIO()
+        pq.write_table(table, buf)
+        respx.get(url).mock(return_value=httpx.Response(200, content=buf.getvalue()))
+    else:
+        respx.get(url).mock(
+            return_value=httpx.Response(
+                200, text=json.dumps({"instance_id": "i1", "problem_statement": "p"}) + "\n"
+            )
         )
-    )
     runner = CliRunner()
     result = runner.invoke(
         app,

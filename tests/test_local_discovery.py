@@ -138,3 +138,22 @@ def test_state_with_weird_assignment_values(tmp_path: Path) -> None:
     result = collect_local_candidates(_config(tmp_path))
     assert [c.model for c in result.candidates] == ["claude-sonnet-4"]
     assert result.candidates[0].efforts == ["low"]
+
+
+def test_variants_cache_flat_shape(tmp_path: Path) -> None:
+    """Real v1 cache shape on a live machine: provider -> model -> [variants]."""
+    _write(
+        tmp_path / "gentle-ai" / "cache" / "model-variants.json",
+        {
+            "tokengo": {
+                "deepseek/deepseek-v4-flash": ["high", "low", "max"],
+            },
+            "modelis": {
+                "claude-sonnet-4-6": ["high", "low"],
+            },
+        },
+    )
+    result = collect_local_candidates(_config(tmp_path))
+    by_key = {(c.provider, c.model): sorted(c.efforts) for c in result.candidates}
+    assert by_key[("tokengo", "deepseek/deepseek-v4-flash")] == ["high", "low", "max"]
+    assert by_key[("modelis", "claude-sonnet-4-6")] == ["high", "low"]

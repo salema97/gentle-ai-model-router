@@ -238,7 +238,29 @@ def discover_variants_cache(config: LocalDiscoveryConfig, result: DiscoveryResul
     if data is None:
         result.notes.append(f"model-variants cache: missing or unreadable ({path})")
         return
-    # Shape (research doc §4): provider list -> models.*.variants keys.
+    # Real v1 shape (verified on a live machine, ~/.gentle-ai/cache/
+    # model-variants.json): flat map {"<providerId>": {"<modelId>": ["v", ...]}}.
+    if isinstance(data, dict) and "providers" not in data:
+        handled = 0
+        for provider_id, model_map in data.items():
+            if not isinstance(provider_id, str) or not isinstance(model_map, dict):
+                continue
+            for model_id, variants in model_map.items():
+                if not isinstance(model_id, str) or not isinstance(variants, list):
+                    continue
+                for variant in variants:
+                    _merge_candidate(
+                        result,
+                        model_id,
+                        provider_id,
+                        str(variant),
+                        Provenance(str(path), f"{provider_id}.{model_id}"),
+                    )
+                handled += 1
+        if not handled:
+            result.notes.append("model-variants cache: unexpected shape, skipped")
+        return
+    # Alternate catalog-style shape: providers list -> models.*.variants keys.
     providers = data.get("providers") if isinstance(data, dict) else None
     if providers is None and isinstance(data, dict):
         providers = [data]  # tolerate a single-provider dict

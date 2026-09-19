@@ -1,0 +1,336 @@
+"""Deterministic prior-weighted heuristic policy.
+
+This is the BASELINE the learned DeBERTa router must beat. It is fully
+deterministic: no randomness, stable tie-breaking by canonical id, and a
+policy version hash that fingerprints the exact configuration used.
+
+Ranking model (documented choice — configurable table over exponential):
+
+- Benchmark prior: per benchmark key (``<benchmark>`` or ``<benchmark>:<category>``),
+  scores are min-max normalized across the candidate set and combined with the
+  phase-configured weights. Missing benchmark data falls back to a flat prior.
+- Effort quality: diminishing returns via a configurable gain table
+  ``quality(effort) = prior + (ceiling - prior) * gain[effort]``. A gain table
+  is used instead of ``1 - e^{-k·level}`` because it is auditable per level and
+  needs no calibration constant; the shape is the same (concave, ceiling-bound).
+- Effort cost: superlinear token multiplier table (reasoning tokens grow
+  faster than quality).
+- Score = quality − λ_price·estimated_cost − λ_latency·latency_penalty.
+  The registry has no per-deployment tps column yet, so the latency term reads
+  an optional benchmark key (``policy.speed_benchmark``) and is 0 when absent.
+- Minimum-sufficient-effort: per (model, deployment) pick the LOWEST effort
+  whose quality meets the phase threshold; among candidates meeting the
+  threshold minimize estimated tokens, break ties by quality.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from dataclasses import dataclass
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from gentle_ai_model_router.registry.models import (
+    Deployment,
+    Model,
+    ModelBenchmark,
+    ModelPrice,
+    ModelVariant,
+    Provider,
+)
+from gentle_ai_model_router.registry.normalize import Effort
+from gentle_ai_model_router.router.config import PhaseConfig, RouterConfig
+from gentle_ai_model_router.router.decision import (
+    CANONICAL_PHASES,
+    Alternative,
+    Decision,
+    TaskContext,
+)
+
+logger = logging.getLogger(__name__)
+
+EFFORT_RANK: dict[str, int] = {level.value: idx for idx, level in enumerate(Effort)}
+
+# Hard capability requirements per phase. spec/design *prefer* structured
+# output (weighted bonus, not a hard filter) — only apply/verify hard-require
+# tool calling.
+_TOOL_CALLING_REQUIRED_PHASES = {"apply", "verify"}
+
+
+class PolicyError(Exception):
+    """Fatal policy failure (e.g. empty registry). Fails closed, never guesses."""
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    model: Model
+    provider: Provider
+    deployment: Deployment
+    variant: ModelVariant
+    prior: float
+    prior_missing: bool
+    quality: float
+    estimated_tokens: float
+    estimated_cost: float
+    latency_penalty: float
+    reason_codes: tuple[str, ...]
+
+
+def normalize_phase(phase: str) -> str:
+    """Accept ``explore`` or ``sdd-explore``; reject anything else."""
+    name = phase.removeprefix("sdd-")
+    if name not in CANONICAL_PHASES:
+        raise PolicyError(
+            f"unknown phase '{phase}' (expected one of: {', '.join(CANONICAL_PHASES)})"
+        )
+    return name
+
+
+def policy_version(phase_cfg: PhaseConfig, config: RouterConfig) -> str:
+    """Fingerprint of the effective policy configuration (deterministic)."""
+    payload = {
+        "phase": phase_cfg.model_dump(),
+        "policy": config.policy.model_dump(),
+    }
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return "pol-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _load_candidates(session: Session) -> list[tuple[Model, Provider, Deployment, ModelVariant]]:
+    stmt = (
+        select(Model, Provider, Deployment, ModelVariant)
+        .join(Deployment, Deployment.model_id == Model.id)
+        .join(Provider, Provider.id == Deployment.provider_id)
+        .join(ModelVariant, ModelVariant.deployment_id == Deployment.id)
+        .order_by(Model.canonical_id, Deployment.deployment_ref, ModelVariant.effort)
+    )
+    return list(session.execute(stmt).all())
+
+
+def _benchmark_priors(
+    session: Session, models: list[Model], weights: dict[str, float], flat_prior: float
+) -> tuple[dict[int, float], set[int]]:
+    """Min-max normalized weighted benchmark prior per model id.
+
+    Returns (prior_by_model_id, model_ids_missing_all_data).
+    """
+    model_ids = [m.id for m in models]
+    rows = session.execute(
+        select(ModelBenchmark).where(ModelBenchmark.model_id.in_(model_ids))
+    ).scalars().all()
+    by_key: dict[str, dict[int, float]] = {}
+    for row in rows:
+        key = row.benchmark if row.category is None else f"{row.benchmark}:{row.category}"
+        by_key.setdefault(key, {})[row.model_id] = row.score
+
+    prior: dict[int, float] = {mid: 0.0 for mid in model_ids}
+    weight_used = 0.0
+    covered: set[int] = set()
+    for key, weight in sorted(weights.items()):
+        scores = by_key.get(key)
+        if not scores:
+            continue
+        covered.update(scores)
+        lo, hi = min(scores.values()), max(scores.values())
+        span = hi - lo
+        for mid in model_ids:
+            if mid in scores:
+                norm = 0.5 if span == 0 else (scores[mid] - lo) / span
+                prior[mid] += weight * norm
+        weight_used += weight
+
+    if weight_used == 0:
+        return {mid: flat_prior for mid in model_ids}, set(model_ids)
+    missing: set[int] = set()
+    for mid in model_ids:
+        if mid in covered:
+            prior[mid] /= weight_used
+        else:
+            # Model contributed to no weighted benchmark: flat prior, flagged.
+            prior[mid] = flat_prior
+            missing.add(mid)
+    return prior, missing
+
+
+def _latest_price(session: Session, deployment_id: int) -> ModelPrice | None:
+    return session.execute(
+        select(ModelPrice)
+        .where(ModelPrice.deployment_id == deployment_id)
+        .order_by(ModelPrice.effective_date.desc(), ModelPrice.id.desc())
+        .limit(1)
+    ).scalars().first()
+
+
+def _passes_hard_filters(
+    model: Model, phase: str, context_tokens: int | None, reason_codes: list[str]
+) -> bool:
+    if context_tokens is not None and model.context_window is not None:
+        if model.context_window < context_tokens:
+            return False
+    if phase in _TOOL_CALLING_REQUIRED_PHASES and model.tool_calling is not True:
+        reason_codes.append("filtered:tool_calling_required")
+        return False
+    return True
+
+
+def select_candidate(
+    session: Session,
+    phase: str,
+    config: RouterConfig,
+    context: TaskContext | None = None,
+) -> Decision:
+    """Select (model, deployment, effort) for a phase. Deterministic.
+
+    Raises :class:`PolicyError` on unknown phase or an empty registry —
+    the policy fails closed and never hallucinates candidates.
+    """
+    phase_name = normalize_phase(phase)
+    phase_cfg = config.phase_config(phase_name)
+    policy = config.policy
+    context = context or TaskContext()
+
+    raw = _load_candidates(session)
+    if not raw:
+        raise PolicyError(
+            "registry is empty: no (model, deployment, variant) candidates. "
+            "Run 'router collect' and 'router normalize' first."
+        )
+
+    models = {m.id: m for m, _, _, _ in raw}
+    priors, missing_prior = _benchmark_priors(
+        session, list(models.values()), phase_cfg.weights, policy.flat_prior
+    )
+
+    # Optional latency proxy: inverse-normalized speed benchmark.
+    speed_rows: dict[int, float] = {}
+    if policy.speed_benchmark:
+        stmt = select(ModelBenchmark).where(
+            ModelBenchmark.benchmark == policy.speed_benchmark,
+            ModelBenchmark.model_id.in_(models.keys()),
+        )
+        for row in session.execute(stmt).scalars().all():
+            speed_rows[row.model_id] = row.score
+
+    per_model_dep: dict[
+        tuple[int, int], list[tuple[Model, Provider, Deployment, ModelVariant]]
+    ] = {}
+    for model, provider, deployment, variant in raw:
+        per_model_dep.setdefault((model.id, deployment.id), []).append(
+            (model, provider, deployment, variant)
+        )
+
+    threshold = phase_cfg.threshold_quality
+    meeting: list[_Candidate] = []
+    for variants in per_model_dep.values():
+        variants.sort(key=lambda t: EFFORT_RANK.get(t[3].effort, 0))
+        model, provider, deployment, _ = variants[0]
+        local_reasons: list[str] = []
+        if not _passes_hard_filters(model, phase_name, context.context_tokens, local_reasons):
+            continue
+        prior = priors[model.id]
+        prior_missing = model.id in missing_prior
+        if prior_missing:
+            local_reasons.append("missing_benchmark_data:using_prior")
+
+        chosen: _Candidate | None = None
+        for _, _, _, variant in variants:
+            gain = policy.effort_quality_gain.get(variant.effort, 0.0)
+            quality = prior + (policy.effort_ceiling - prior) * gain
+            if quality >= threshold:
+                multiplier = policy.effort_token_multiplier.get(variant.effort, 1.0)
+                base = max(policy.base_tokens, context.context_tokens or 0)
+                estimated_tokens = base * multiplier
+                price = _latest_price(session, deployment.id)
+                has_price = price is not None and (
+                    price.input_price is not None or price.output_price is not None
+                )
+                if has_price:
+                    in_p = (
+                        price.input_price
+                        if price.input_price is not None
+                        else policy.default_input_price
+                    )
+                    out_p = (
+                        price.output_price
+                        if price.output_price is not None
+                        else policy.default_output_price
+                    )
+                else:
+                    in_p, out_p = policy.default_input_price, policy.default_output_price
+                    local_reasons.append("missing_price_data:using_default")
+                blended = (
+                    (1 - policy.output_fraction) * in_p + policy.output_fraction * out_p
+                )
+                estimated_cost = estimated_tokens * blended / 1_000_000
+                if speed_rows and model.id in speed_rows:
+                    top = max(speed_rows.values())
+                    latency_penalty = (top - speed_rows[model.id]) / top if top else 0.0
+                else:
+                    latency_penalty = 0.0
+                reasons = list(local_reasons) + [f"meets_threshold:{variant.effort}"]
+                chosen = _Candidate(
+                    model=model,
+                    provider=provider,
+                    deployment=deployment,
+                    variant=variant,
+                    prior=prior,
+                    prior_missing=prior_missing,
+                    quality=quality,
+                    estimated_tokens=estimated_tokens,
+                    estimated_cost=estimated_cost,
+                    latency_penalty=latency_penalty,
+                    reason_codes=tuple(reasons),
+                )
+                break
+        if chosen is not None:
+            meeting.append(chosen)
+
+    if not meeting:
+        raise PolicyError(
+            f"no candidate meets threshold_quality={threshold} for phase "
+            f"'{phase_name}'; lower the threshold or enrich the registry"
+        )
+
+    def score_of(c: _Candidate) -> float:
+        return (
+            c.quality
+            - policy.lambda_price * c.estimated_cost
+            - policy.lambda_latency * c.latency_penalty
+        )
+
+    # Minimum-sufficient-effort policy: minimize tokens, break ties by quality,
+    # then by canonical id for determinism.
+    meeting.sort(
+        key=lambda c: (c.estimated_tokens, -c.quality, c.model.canonical_id, c.variant.effort)
+    )
+    winner = meeting[0]
+    reasons = list(winner.reason_codes) + ["cheapest_of_meeting"]
+    alternatives = tuple(
+        Alternative(
+            model=c.model.canonical_id,
+            provider=c.provider.registry_key,
+            deployment=c.deployment.deployment_ref,
+            effort=c.variant.effort,
+            score=round(score_of(c), 6),
+            quality=round(c.quality, 6),
+            estimated_tokens=c.estimated_tokens,
+        )
+        for c in meeting[1 : policy.top_k]
+    )
+    return Decision(
+        phase=phase_name,
+        model=winner.model.canonical_id,
+        provider=winner.provider.registry_key,
+        deployment=winner.deployment.deployment_ref,
+        effort=winner.variant.effort,
+        score=round(score_of(winner), 6),
+        quality=round(winner.quality, 6),
+        alternatives=alternatives,
+        reason_codes=tuple(reasons),
+        estimated_tokens=winner.estimated_tokens,
+        estimated_cost=round(winner.estimated_cost, 6),
+        policy_version=policy_version(phase_cfg, config),
+    )

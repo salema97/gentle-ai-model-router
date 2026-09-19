@@ -55,6 +55,71 @@ escalation:
     sdd-explore: []
     sdd-apply: []
 
+# ---------------------------------------------------------------------------
+# Phase 1b: deterministic baseline policy
+# ---------------------------------------------------------------------------
+
+# Per-phase policy for the baseline ranker (router/policy.py). Keys accept the
+# bare phase name ("explore") or "sdd-explore". threshold_quality is the
+# minimum-sufficient-effort floor; weights are benchmark keys (with optional
+# ":category" suffix, e.g. lmarena_elo:text) min-max normalized across the
+# candidate set.
+phases:
+  init:      { threshold_quality: 0.60 }
+  explore:   { threshold_quality: 0.60, weights: { "lmarena_elo:text": 1.0, "artificial_analysis_intelligence_index": 0.3 } }
+  research:  { threshold_quality: 0.65 }
+  propose:   { threshold_quality: 0.75 }
+  spec:      { threshold_quality: 0.80 }
+  design:    { threshold_quality: 0.85, weights: { "artificial_analysis_intelligence_index": 1.0, "lmarena_elo:webdev": 0.5 } }
+  tasks:     { threshold_quality: 0.70 }
+  apply:     { threshold_quality: 0.75, weights: { "artificial_analysis_intelligence_index": 1.0 } }
+  verify:    { threshold_quality: 0.80, weights: { "artificial_analysis_intelligence_index": 1.0 } }
+  archive:   { threshold_quality: 0.60 }
+  onboard:   { threshold_quality: 0.60 }
+
+policy:
+  flat_prior: 0.5            # prior when a candidate has no benchmark rows
+  effort_ceiling: 0.98       # quality asymptote at max effort
+  # Diminishing-returns gain table: quality = prior + (ceiling - prior) * gain.
+  # (Chosen over 1 - e^{-k*level}: auditable per level, no calibration const.)
+  effort_quality_gain:
+    "off": 0.0
+    "minimal": 0.2
+    "low": 0.4
+    "medium": 0.6
+    "high": 0.75
+    "xhigh": 0.85
+    "max": 0.92
+  # Superlinear token cost per effort (cost grows faster than quality).
+  effort_token_multiplier:
+    "off": 1.0
+    "minimal": 1.15
+    "low": 1.4
+    "medium": 1.9
+    "high": 2.6
+    "xhigh": 3.5
+    "max": 5.0
+  lambda_price: 1.0          # score penalty per estimated USD
+  lambda_latency: 0.0        # off until the registry carries tps data
+  speed_benchmark: null      # optional benchmark key used as 1/tps proxy
+  base_tokens: 10000         # token estimate when no task context is given
+  output_fraction: 0.3       # share of estimated tokens priced as output
+  default_input_price: 5.0   # USD/1M when the registry has no price row
+  default_output_price: 15.0
+  top_k: 5
+
+# OpenCode write adapter (integration/opencode_adapter.py).
+integrate:
+  # model-variants caches used to clamp efforts DOWN to supported levels
+  # (telemetry-probe.md §2.2: the TUI deletes unknown efforts).
+  variants_cache_v1: "~/.gentle-ai/cache/model-variants.json"
+  variants_cache_v2_dir: "~/.gentle-ai/cache/opencode-v2"
+  backup: true               # write <path>.router-backup-<ts> before first write
+
+# Telemetry shim (integration/telemetry_shim.py): local-only store.
+shim:
+  database_filename: "telemetry.sqlite"
+
 api_server:
   host: "127.0.0.1"
   port: 8377

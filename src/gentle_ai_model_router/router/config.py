@@ -83,6 +83,97 @@ class LoggingConfig(BaseModel):
     provenance: bool = True
 
 
+# Default per-phase quality floors (all configurable via router.yaml
+# ``phases.<name>.threshold_quality``). apply/verify test success is handled
+# by escalation, not by the threshold, hence the lower floor there.
+DEFAULT_PHASE_THRESHOLDS: dict[str, float] = {
+    "init": 0.6,
+    "explore": 0.6,
+    "research": 0.65,
+    "propose": 0.75,
+    "spec": 0.8,
+    "design": 0.85,
+    "tasks": 0.7,
+    "apply": 0.75,
+    "verify": 0.8,
+    "archive": 0.6,
+    "onboard": 0.6,
+}
+
+DEFAULT_PHASE_WEIGHTS: dict[str, float] = {
+    "artificial_analysis_intelligence_index": 1.0,
+}
+
+DEFAULT_EFFORT_QUALITY_GAIN: dict[str, float] = {
+    "off": 0.0,
+    "minimal": 0.2,
+    "low": 0.4,
+    "medium": 0.6,
+    "high": 0.75,
+    "xhigh": 0.85,
+    "max": 0.92,
+}
+
+# Superlinear token cost multiplier per effort (diminishing returns: cost
+# grows faster than the quality gain from DEFAULT_EFFORT_QUALITY_GAIN).
+DEFAULT_EFFORT_TOKEN_MULTIPLIER: dict[str, float] = {
+    "off": 1.0,
+    "minimal": 1.15,
+    "low": 1.4,
+    "medium": 1.9,
+    "high": 2.6,
+    "xhigh": 3.5,
+    "max": 5.0,
+}
+
+
+class PhaseConfig(BaseModel):
+    """Per-phase policy: quality floor + benchmark prior weights.
+
+    Weight keys are registry benchmark rows: ``<benchmark>`` for rows without
+    category, ``<benchmark>:<category>`` for categorized ones (e.g.
+    ``lmarena_elo:text``).
+    """
+
+    threshold_quality: float
+    weights: dict[str, float] = Field(default_factory=lambda: dict(DEFAULT_PHASE_WEIGHTS))
+
+
+class PolicyConfig(BaseModel):
+    """Deterministic baseline ranker parameters."""
+
+    flat_prior: float = 0.5  # prior when a candidate has no benchmark data
+    effort_ceiling: float = 0.98  # quality asymptote at max effort
+    effort_quality_gain: dict[str, float] = Field(
+        default_factory=lambda: dict(DEFAULT_EFFORT_QUALITY_GAIN)
+    )
+    effort_token_multiplier: dict[str, float] = Field(
+        default_factory=lambda: dict(DEFAULT_EFFORT_TOKEN_MULTIPLIER)
+    )
+    lambda_price: float = 1.0
+    lambda_latency: float = 0.0  # off until the registry carries tps data
+    speed_benchmark: str | None = None  # benchmark key used as tps proxy
+    base_tokens: int = 10_000
+    output_fraction: float = 0.3  # share of estimated tokens priced as output
+    default_input_price: float = 5.0  # USD/1M, used when price unknown
+    default_output_price: float = 15.0
+    top_k: int = 5
+
+
+class IntegrateConfig(BaseModel):
+    """OpenCode write-adapter settings (paths support ~ expansion)."""
+
+    variants_cache_v1: str = "~/.gentle-ai/cache/model-variants.json"
+    variants_cache_v2_dir: str = "~/.gentle-ai/cache/opencode-v2"
+    backup: bool = True
+
+
+class ShimConfig(BaseModel):
+    """Telemetry shim settings."""
+
+    database_filename: str = "telemetry.sqlite"
+
+
 class RouterConfig(BaseModel):
     """Top-level router configuration."""
 
@@ -90,6 +181,10 @@ class RouterConfig(BaseModel):
     data_sources: DataSourcesConfig = Field(default_factory=DataSourcesConfig)
     registry: RegistryConfig = Field(default_factory=RegistryConfig)
     phase_thresholds: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    phases: dict[str, PhaseConfig] = Field(default_factory=dict)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    integrate: IntegrateConfig = Field(default_factory=IntegrateConfig)
+    shim: ShimConfig = Field(default_factory=ShimConfig)
     token_weights: dict[str, float] = Field(default_factory=dict)
     api: ApiConfig = Field(default_factory=ApiConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
@@ -118,6 +213,23 @@ class RouterConfig(BaseModel):
     def sqlite_fallback_url(self) -> str:
         """SQLite URL used when the configured Postgres is unreachable."""
         return f"sqlite:///{self.data_dir / self.registry.sqlite_filename}"
+
+    def phase_config(self, phase: str) -> PhaseConfig:
+        """Resolve per-phase config; accepts ``explore`` or ``sdd-explore``.
+
+        ``phases.<name>`` in router.yaml wins; missing phases fall back to the
+        default threshold table with the default weights.
+        """
+        name = phase.removeprefix("sdd-")
+        for key in (phase, name):
+            if key in self.phases:
+                return self.phases[key]
+        return PhaseConfig(threshold_quality=DEFAULT_PHASE_THRESHOLDS[name])
+
+    @property
+    def telemetry_url(self) -> str:
+        """SQLite URL for the telemetry shim store."""
+        return f"sqlite:///{self.data_dir / self.shim.database_filename}"
 
 
 def find_config_file(config_path: str | Path | None = None) -> Path | None:

@@ -7,6 +7,8 @@ Exit codes: 0 = success (including graceful degradation with warnings),
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 import httpx
 import typer
@@ -24,8 +26,13 @@ from gentle_ai_model_router.collector.local_discovery import (
 )
 from gentle_ai_model_router.collector.logging_conf import setup_logging
 from gentle_ai_model_router.collector.snapshots import SnapshotRecord, SnapshotStore
+from gentle_ai_model_router.integration import opencode_adapter as oa
+from gentle_ai_model_router.integration import telemetry_shim
 from gentle_ai_model_router.registry import db as registry_db
+from gentle_ai_model_router.registry.normalize import Effort
 from gentle_ai_model_router.router.config import RouterConfig, load_config
+from gentle_ai_model_router.router.decision import CANONICAL_PHASES, TaskContext
+from gentle_ai_model_router.router.policy import PolicyError, select_candidate
 
 app = typer.Typer(
     name="router",
@@ -34,8 +41,12 @@ app = typer.Typer(
 )
 snapshots_app = typer.Typer(help="Snapshot inspection.", no_args_is_help=True)
 registry_app = typer.Typer(help="Registry inspection.", no_args_is_help=True)
+integrate_app = typer.Typer(help="Write decisions into runtime configs.", no_args_is_help=True)
+shim_app = typer.Typer(help="Telemetry shim ingestion.", no_args_is_help=True)
 app.add_typer(snapshots_app, name="snapshots")
 app.add_typer(registry_app, name="registry")
+app.add_typer(integrate_app, name="integrate")
+app.add_typer(shim_app, name="shim")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -241,6 +252,176 @@ def registry_stats(
 
 def main() -> None:
     app()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 1b: deterministic policy + OpenCode write adapter + telemetry shim
+# --------------------------------------------------------------------------- #
+
+
+@app.command()
+def route(
+    phase: str = typer.Option(..., "--phase", help="SDD phase (one of the 11 canonical phases)."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+    context_tokens: int | None = typer.Option(None, "--context-tokens", help="Task context size."),
+    task_type: str | None = typer.Option(None, "--task-type", help="Task type hint."),
+    as_json: bool = typer.Option(False, "--json", help="Print the decision as JSON."),
+) -> None:
+    """Select (model, deployment, effort) for a phase with the baseline policy."""
+    config, _ = _load_ctx(config_path, data_dir)
+    engine, _effective = registry_db.get_engine_with_fallback(
+        config.database_url, config.sqlite_fallback_url
+    )
+    registry_db.init_schema(engine)
+    try:
+        with registry_db.Session(engine) as session:
+            decision = select_candidate(
+                session,
+                phase,
+                config,
+                TaskContext(task_type=task_type, context_tokens=context_tokens),
+            )
+    except PolicyError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    if as_json:
+        console.print(json.dumps(decision.to_dict(), indent=2))
+        return
+    table = Table(title=f"route: {decision.phase}")
+    table.add_row("model", decision.model)
+    table.add_row("provider", decision.provider)
+    table.add_row("deployment", decision.deployment)
+    table.add_row("effort", decision.effort)
+    table.add_row("score", str(decision.score))
+    table.add_row("quality", str(decision.quality))
+    table.add_row("estimated_tokens", str(decision.estimated_tokens))
+    table.add_row("estimated_cost", f"${decision.estimated_cost:.6f}")
+    table.add_row("policy_version", decision.policy_version)
+    table.add_row("reason_codes", ", ".join(decision.reason_codes))
+    if decision.alternatives:
+        table.add_row(
+            "alternatives",
+            "\n".join(
+                f"{a.model}#{a.effort} ({a.estimated_tokens:.0f} tok)"
+                for a in decision.alternatives
+            ),
+        )
+    console.print(table)
+
+
+def _resolve_variants(config: RouterConfig) -> dict[tuple[str, str], list[str]]:
+    return oa.load_variants_cache(
+        Path(config.integrate.variants_cache_v1).expanduser(),
+        Path(config.integrate.variants_cache_v2_dir).expanduser(),
+    )
+
+
+@integrate_app.command("opencode")
+def integrate_opencode(
+    phase: str = typer.Option(..., "--phase", help="SDD phase."),
+    model: str = typer.Option(..., "--model", help="provider/model."),
+    effort: str = typer.Option(..., "--effort", help="Reasoning effort level."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    target: str | None = typer.Option(
+        None, "--config-target", help="OpenCode config path (default: resolved global)."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the diff, write nothing."),
+    create: bool = typer.Option(False, "--create", help="Create the config file if missing."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Write agent['sdd-<phase>'].model/variant into an OpenCode config."""
+    config, _ = _load_ctx(config_path, data_dir)
+    name = phase.removeprefix("sdd-")
+    if name not in CANONICAL_PHASES:
+        err_console.print(
+            f"[red]error: unknown phase '{phase}' "
+            f"(expected one of: {', '.join(CANONICAL_PHASES)})[/red]"
+        )
+        raise typer.Exit(code=2)
+    if effort not in {level.value for level in Effort}:
+        err_console.print(
+            f"[red]error: unknown effort '{effort}' (expected one of: "
+            f"{', '.join(level.value for level in Effort)})[/red]"
+        )
+        raise typer.Exit(code=2)
+    path = oa.resolve_global_config(target)
+    variants = _resolve_variants(config)
+    try:
+        result = oa.apply_decision(
+            path, name, model, effort, variants, create=create, dry_run=dry_run,
+            backup=config.integrate.backup,
+        )
+    except oa.AdapterError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    for code in result.reason_codes:
+        err_console.print(f"[yellow]reason: {code}[/yellow]")
+    if result.diff:
+        console.print(result.diff, highlight=False)
+    if result.wrote:
+        console.print(f"[green]wrote {result.path}[/green]")
+        if result.backup_path:
+            console.print(f"[dim]backup: {result.backup_path}[/dim]")
+    else:
+        console.print("[dim]dry-run: nothing written[/dim]")
+
+
+@integrate_app.command("rollback")
+def integrate_rollback(
+    target: str | None = typer.Option(
+        None, "--config-target", help="OpenCode config path (default: resolved global)."
+    ),
+) -> None:
+    """Restore the latest router backup of an OpenCode config."""
+    path = oa.resolve_global_config(target)
+    restored = oa.rollback(path)
+    if restored is None:
+        err_console.print(f"[yellow]no backup found for {path}[/yellow]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]restored {path} from {restored}[/green]")
+
+
+@integrate_app.command("status")
+def integrate_status(
+    target: str | None = typer.Option(
+        None, "--config-target", help="OpenCode config path (default: resolved global)."
+    ),
+) -> None:
+    """Show current per-phase assignments from the effective OpenCode config."""
+    path = oa.resolve_global_config(target)
+    assignments = oa.read_assignments(path)
+    table = Table(title=f"opencode assignments ({path})")
+    table.add_column("agent")
+    table.add_column("model")
+    table.add_column("variant")
+    table.add_column("managed")
+    for agent_key in [f"sdd-{p}" for p in CANONICAL_PHASES] + ["gentle-orchestrator"]:
+        entry = assignments.get(agent_key)
+        if entry is None:
+            continue
+        table.add_row(
+            agent_key,
+            str(entry.get("model") or "-"),
+            str(entry.get("variant") or "-"),
+            "gentle-ai/sdd" if entry.get("managed") else "-",
+        )
+    console.print(table)
+
+
+@shim_app.command("ingest")
+def shim_ingest(
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+    db: str | None = typer.Option(None, "--db", help="Telemetry SQLite path override."),
+) -> None:
+    """Ingest execution JSON-lines from stdin into the telemetry store."""
+    config, _ = _load_ctx(config_path, data_dir)
+    store = telemetry_shim.ShimStore(db or config.telemetry_url)
+    store.init_schema()
+    with store.session() as session:
+        counts = store.ingest_jsonl(session, sys.stdin)
+    console.print(json.dumps(counts))
 
 
 if __name__ == "__main__":

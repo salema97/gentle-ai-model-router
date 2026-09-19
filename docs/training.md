@@ -1,4 +1,4 @@
-# Training the DeBERTa ranker
+# Training the ModernBERT ranker
 
 > ## ⚠ BOOTSTRAP-LABEL WARNING
 >
@@ -15,7 +15,7 @@
 ## Objective
 
 Per SDD phase, score every `(model, deployment, effort)` candidate with a
-DeBERTa-V3 encoder and rank by score. This is a **ranker, not a multiclass
+ModernBERT encoder and rank by score. This is a **ranker, not a multiclass
 classifier**: the project's objective is `argmin tokens_per_success` subject
 to a quality floor, which is an ordering problem over a variable candidate
 set.
@@ -46,9 +46,9 @@ torch seeds set in `training/train.py`). No randomness without a seed.
 
 ## Smoke path without heavy downloads
 
-`tiny_deberta_config()` (in `training/model.py`) builds a random-initialized
-2-layer DeBERTa-V2 — tests and dev experiments run fully offline. The
-default `model_name` remains `microsoft/deberta-v3-base`.
+`tiny_modernbert_config()` (in `training/model.py`) builds a random-initialized
+2-layer ModernBERT — tests and dev experiments run fully offline. The
+default `model_name` is `answerdotai/ModernBERT-base`.
 
 ## Commands
 

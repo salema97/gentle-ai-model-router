@@ -1,7 +1,7 @@
 # Target Architecture — Gentle AI Model Router
 
 **Status**: Phases 0–3a IMPLEMENTED (collectors, registry, dataset builder,
-deterministic baseline policy + escalation ladder, DeBERTa ranker
+deterministic baseline policy + escalation ladder, ModernBERT ranker
 training/eval harness `[train]`, telemetry shim, OpenCode adapter, FastAPI
 `/route` server + policy inspection CLI). The component table below marks
 each module ✅ implemented / ⏳ pending; the original design text is kept
@@ -12,7 +12,7 @@ systems and must be re-validated before Phase 1 implementation.
 
 **Pending (explicitly not implemented)**: the bandit/policy learning loop on
 telemetry (Phase 4), Pi + Codex adapters, the learned-policy promotion
-workflow (a trained DeBERTa checkpoint replacing the baseline only after it
+workflow (a trained ModernBERT checkpoint replacing the baseline only after it
 beats it offline), and real hook attachment into Gentle AI runtimes (today
 only the OpenCode write adapter and the JSONL ingest shim surface exist).
 
@@ -79,7 +79,7 @@ regress success rate below a configurable threshold).
               ▼               ▼                    ▼
     ┌──────────────┐ ┌───────────────┐  ┌──────────────────┐
     │  training/   │ │   training/   │  │     router/      │
-    │  deberta_    │ │  policy.py    │  │  ranker.py       │
+    │  modernbert_ │ │  policy.py    │  │  ranker.py       │
     │  ranker.py   │ │  constrained  │  │  (loads ranker + │
     │ (phase→      │ │  bandit over  │  │  policy, applies │
     │  candidate   │ │  candidates,  │  │  per-phase       │

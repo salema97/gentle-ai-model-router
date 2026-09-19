@@ -1,8 +1,8 @@
 Phase,BaselineModel,BaselineEffort,RouterModel,RouterEffort,TokensBaseline,TokensRouter,QualBaseline,QualRouter,QualFloor,TimeBaseline,TimeRouter,TokenSavingsPct,TimeSavingsPct
-explore,Claude 3.7 Sonnet,high,Google Gemini 2.5 Flash,low,15700,5400,88.0,89.0,80.0,24.5,6.8,65.60509554140127,72.24489795918367
-propose,Claude 3.7 Sonnet,high,Meta Llama 3.3 70B,medium,18300,7800,87.5,88.5,80.0,31.0,13.2,57.377049180327866,57.41935483870968
-spec,Claude 3.7 Sonnet,high,OpenAI o3-mini,medium,22000,9800,91.0,91.5,85.0,38.6,16.5,55.45454545454545,57.2538860103627
-design,Claude 3.7 Sonnet,high,Claude 3.7 Sonnet (Thinking),high,28300,16800,93.0,95.0,85.0,52.0,32.0,40.63604240282685,38.46153846153847
-tasks,Claude 3.7 Sonnet,high,Kimi K3 / GLM-5.2,low,16900,6200,88.5,89.5,85.0,28.3,10.4,63.31360946745562,63.25088339222614
-apply,Claude 3.7 Sonnet,high,GLM-4-Plus / Claude 3.7,low,36800,13900,92.0,93.0,90.0,68.4,26.2,62.22826086956522,61.69590643274854
-verify,Claude 3.7 Sonnet,high,OpenAI o3-mini (High),high,28300,11500,94.0,95.5,90.0,54.1,22.8,59.36395759717315,57.85582255083179
+explore,Claude Fable 5.1,high,Google Gemini 3.8 Flash,low,15700,5200,88.5,89.5,80.0,24.5,6.2,66.87898089171973,74.69387755102042
+propose,Claude Fable 5.1,high,Meta Llama 4 Maverick,medium,18300,7500,88.0,89.0,80.0,31.0,12.8,59.01639344262295,58.70967741935483
+spec,Claude Fable 5.1,high,GLM-5.3,medium,22000,9600,91.0,92.0,85.0,38.6,15.8,56.36363636363636,59.067357512953365
+design,Claude Fable 5.1,high,Claude Fable 5.1 (Thinking),high,28300,16500,94.0,95.5,85.0,52.0,31.5,41.69611307420495,39.42307692307692
+tasks,Claude Fable 5.1,high,Kimi K3,low,16900,6100,89.0,90.0,85.0,28.3,9.8,63.905325443786985,65.37102473498233
+apply,Claude Fable 5.1,high,Claude Sonnet 5,low,36800,13500,92.5,93.5,90.0,68.4,25.4,63.315217391304344,62.8654970760234
+verify,Claude Fable 5.1,high,OpenAI GPT-5.6 Sol,high,28300,11200,94.5,96.0,90.0,54.1,21.5,60.42402826855123,60.258780036968574

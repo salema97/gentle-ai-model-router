@@ -102,3 +102,6 @@ Commit per work unit on a feature branch.
   inline in 928f382 + v1 backward-load test added. Suite 359 passed; 1
   pre-existing failure (test_fresh_cache_short_circuits, httpx MockTransport
   API drift, fails on base too). Branch pushed to origin. Next: T8 docs.
+- 2026-09-19 — T8 done in 2bd6e3b (README/runbook/telemetry-shim). Feature
+  complete: all 8 tasks. Issue #1 + PR #2 opened (type:feature), branch
+  feat/bandit-policy-loop pushed.

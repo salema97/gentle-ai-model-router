@@ -438,6 +438,29 @@ def _open_registry(config: RouterConfig):
 # --------------------------------------------------------------------------- #
 
 
+def _resolve_serve_ranker(ranker: str | None, models_dir: Path) -> Any | None:
+    """Build the OnnxRanker for serve: explicit --ranker wins, else the record.
+
+    Without --ranker the promoted checkpoint is resolved from
+    ``models/promoted/promoted.json`` (artifact_kind=checkpoint) → its dir →
+    model.quant.onnx preferred, model.onnx fallback. Returns None when no
+    checkpoint is promoted. Raises PromotionError when the record points to
+    a missing artifact (the serve command fails closed on that).
+    """
+    from gentle_ai_model_router.training import promote as promote_mod
+    from gentle_ai_model_router.training.onnx_export import OnnxRanker
+
+    if ranker is not None:
+        ranker_p = Path(ranker)
+        if ranker_p.is_file():
+            return OnnxRanker(ranker_p.parent, model_path=ranker_p)
+        return OnnxRanker(ranker_p)
+    onnx_path = promote_mod.resolve_promoted_onnx(models_dir)
+    if onnx_path is None:
+        return None
+    return OnnxRanker(onnx_path.parent, model_path=onnx_path)
+
+
 @app.command()
 def serve(
     host: str | None = typer.Option(None, "--host", help="Bind host (default: config api.host)."),
@@ -447,11 +470,15 @@ def serve(
     ranker: str | None = typer.Option(
         None, "--ranker", help="Path to ONNX ranker directory or model file."
     ),
+    models_dir: str = typer.Option(
+        "models", "--models-dir", help="Models root that holds the promoted/ record."
+    ),
 ) -> None:
     """Serve the routing API over uvicorn (localhost by default, local-first)."""
     import uvicorn
 
     from gentle_ai_model_router.api.server import create_app
+    from gentle_ai_model_router.training import promote as promote_mod
 
     config, _ = _load_ctx(config_path, data_dir)
     engine = _open_registry(config)
@@ -461,27 +488,17 @@ def serve(
     shim_store = telemetry_shim.ShimStore(shim_url)
     shim_store.init_schema()
 
-    ranker_instance: Any | None = None
-    default_onnx = Path("models/modernbert-router/v9/model.quant.onnx")
-    if not default_onnx.exists():
-        default_onnx = Path("models/deberta-router/v9/model.quant.onnx")
-    if ranker is not None:
-        from gentle_ai_model_router.training.onnx_export import OnnxRanker
-
-        ranker_p = Path(ranker)
-        if ranker_p.is_file():
-            ranker_instance = OnnxRanker(ranker_p.parent, model_path=ranker_p)
-        else:
-            ranker_instance = OnnxRanker(ranker_p)
-    elif default_onnx.exists():
-        try:
-            from gentle_ai_model_router.training.onnx_export import OnnxRanker
-
-            ranker_instance = OnnxRanker(default_onnx.parent, model_path=default_onnx)
-        except Exception as exc:
-            err_console.print(
-                f"[yellow]warning: could not auto-load default ONNX ranker: {exc}[/yellow]"
-            )
+    try:
+        ranker_instance = _resolve_serve_ranker(ranker, Path(models_dir))
+    except promote_mod.PromotionError as exc:
+        # Fail closed: the promotion record points to a missing artifact.
+        err_console.print(f"[red]error: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        err_console.print(
+            f"[yellow]warning: could not auto-load promoted ONNX ranker: {exc}[/yellow]"
+        )
+        ranker_instance = None
 
     api_app = create_app(config, engine, shim_store, ranker=ranker_instance)
     bind_host = host or config.api.host
@@ -1949,44 +1966,57 @@ def promote(
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Decide and print, write nothing."),
     status: bool = typer.Option(False, "--status", help="Print the current promoted record."),
+    thresholds_path: str | None = typer.Option(
+        None,
+        "--thresholds",
+        help=(
+            "Promote a thresholds artifact instead of a checkpoint: JSON file with "
+            "threshold-tune proposals (the `router thresholds propose` output, a list "
+            "or {'proposals': [...], 'bandit_version': ...})."
+        ),
+    ),
     models_dir: str = typer.Option(
         "models", "--models-dir", help="Models root that holds the promoted/ record."
     ),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
 ) -> None:
-    """Promote a checkpoint only if it beats the active router on eval metrics.
+    """Promote an artifact: a checkpoint (if it beats the active router on
+    eval metrics) or an evidence-backed thresholds payload.
 
-    NEVER auto-replaces the active router: candidate -> evaluate -> compare ->
-    promote. Exit codes: 0 = promoted (or dry-run), 1 = comparison says keep,
-    2 = usage/validation errors.
+    NEVER auto-replaces the active record: candidate -> evaluate -> compare ->
+    promote (checkpoints), or proposals -> evidence-filter -> promote
+    (thresholds, no metric comparison — evidence is recorded). Exit codes:
+    0 = promoted (or dry-run), 1 = comparison says keep, 2 = usage/validation
+    errors.
     """
     from gentle_ai_model_router.training import promote as promote_mod
 
     models_root = Path(models_dir)
     if status:
-        if candidate is not None or dataset is not None:
+        if candidate is not None or dataset is not None or thresholds_path is not None:
             err_console.print("[red]error: --status takes no other action options[/red]")
             raise typer.Exit(code=2)
         current = promote_mod.load_promoted(models_root)
         if current is None:
             console.print("none")
             return
-        table = Table(title=f"promoted router ({promote_mod.promoted_dir(models_root)})")
-        for key in (
-            "promoted_checkpoint",
-            "metrics_path",
-            "promotion_reason",
-            "promoted_at",
-            "git_commit",
-            "promoted_by",
-        ):
-            table.add_row(key, str(current["record"].get(key, "-")))
-        console.print(table)
+        _print_promotion_status(current, models_root)
+        return
+
+    if thresholds_path is not None:
+        if candidate is not None or dataset is not None:
+            err_console.print(
+                "[red]error: --thresholds is mutually exclusive with --candidate/--dataset[/red]"
+            )
+            raise typer.Exit(code=2)
+        _promote_thresholds_cli(promote_mod, models_root, thresholds_path, dry_run)
         return
 
     if candidate is None:
-        err_console.print("[red]error: --candidate is required (or use --status)[/red]")
+        err_console.print(
+            "[red]error: --candidate or --thresholds is required (or use --status)[/red]"
+        )
         raise typer.Exit(code=2)
 
     config = None
@@ -2018,6 +2048,119 @@ def promote(
     assert outcome.record is not None  # wrote=True implies a record
     console.print(
         f"[green]promoted {outcome.record['promoted_checkpoint']} "
+        f"-> {outcome.record_path}[/green]"
+    )
+
+
+def _print_promotion_status(current: Any, models_root: Path) -> None:
+    """--status output for the active record, per artifact kind."""
+    from gentle_ai_model_router.training import promote as promote_mod
+
+    record = current["record"]
+    kind = promote_mod.artifact_kind_of(record)
+    if kind == promote_mod.ARTIFACT_KIND_THRESHOLDS:
+        table = Table(title=f"promoted thresholds ({promote_mod.promoted_dir(models_root)})")
+        table.add_column("phase")
+        table.add_column("threshold", justify="right")
+        table.add_column("kind")
+        table.add_column("executions", justify="right")
+        table.add_column("success_rate", justify="right")
+        for phase, value in record.get("thresholds", {}).items():
+            ev = record.get("evidence", {}).get(phase, {})
+            success_rate = ev.get("success_rate")
+            table.add_row(
+                phase,
+                f"{value:.3f}",
+                str(ev.get("kind", "-")),
+                str(ev.get("executions", 0)),
+                f"{success_rate:.3f}" if success_rate is not None else "-",
+            )
+        table.caption = (
+            f"source: {record.get('source', '-')} | promoted_at: "
+            f"{record.get('promoted_at', '-')} | promoted_by: {record.get('promoted_by', '-')}"
+        )
+        console.print(table)
+        return
+    table = Table(title=f"promoted router ({promote_mod.promoted_dir(models_root)})")
+    for key in (
+        "artifact_kind",
+        "promoted_checkpoint",
+        "metrics_path",
+        "promotion_reason",
+        "promoted_at",
+        "git_commit",
+        "promoted_by",
+    ):
+        table.add_row(key, str(record.get(key, "-")))
+    console.print(table)
+
+
+def _promote_thresholds_cli(
+    promote_mod: Any, models_root: Path, thresholds_path: str, dry_run: bool
+) -> None:
+    """Thresholds promotion from a proposals JSON file (`router thresholds propose` output).
+
+    The file holds threshold-tune proposals (a list, or an object with
+    ``proposals`` + optional ``bandit_version``); only upgrade/downgrade
+    kinds promote. No metric comparison — evidence is recorded, never
+    auto-replaced, atomic write, dry-run first.
+    """
+    import json
+
+    path = Path(thresholds_path)
+    if not path.is_file():
+        err_console.print(f"[red]error: thresholds proposals file not found: {path}[/red]")
+        raise typer.Exit(code=2)
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        err_console.print(f"[red]error: invalid thresholds JSON in {path}: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    if isinstance(doc, dict):
+        proposals = doc.get("proposals", [])
+        source = (
+            f"bandit_version:{doc['bandit_version']}" if doc.get("bandit_version") else str(path)
+        )
+    elif isinstance(doc, list):
+        proposals = doc
+        source = str(path)
+    else:
+        err_console.print(
+            f"[red]error: thresholds JSON must be a proposals list or an object "
+            f"with 'proposals', got {type(doc).__name__}[/red]"
+        )
+        raise typer.Exit(code=2)
+
+    payload, evidence = promote_mod.thresholds_payload_from_proposals(proposals)
+    if not payload:
+        err_console.print(
+            "[yellow]no upgrade/downgrade proposals — nothing to promote[/yellow]"
+        )
+        raise typer.Exit(code=1)
+    try:
+        outcome = promote_mod.promote_checkpoint(
+            None,
+            models_dir=models_root,
+            thresholds=payload,
+            evidence=proposals,
+            source=source,
+            dry_run=dry_run,
+        )
+    except promote_mod.PromotionError as exc:
+        err_console.print(f"[red]error: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    if dry_run:
+        console.print(
+            f"[bold]decision: PROMOTE[/bold] (dry-run — nothing written) "
+            f"thresholds for {len(payload)} phase(s) from {source}"
+        )
+        for phase, value in payload.items():
+            console.print(f"  {phase}: {value:.3f}")
+        return
+    assert outcome.record is not None  # wrote=True implies a record
+    console.print(
+        f"[green]promoted thresholds ({len(payload)} phases) from {source} "
         f"-> {outcome.record_path}[/green]"
     )
 

@@ -311,6 +311,422 @@ def test_cli_usage_errors(tmp_path: Path) -> None:
     assert result.exit_code == 2
 
 
+# --------------------------------------------------------------------------- #
+# Thresholds artifact promotions (artifact_kind = "thresholds")
+# --------------------------------------------------------------------------- #
+
+
+def _proposal(
+    phase: str,
+    kind: str,
+    proposed: float,
+    *,
+    executions: int = 12,
+    success_rate: float | None = 0.85,
+    current: float = 0.50,
+    selected_effort: str | None = "low",
+    tokens_per_success: float | None = 9000.0,
+) -> dict:
+    """One threshold-tune proposal dict (the `router thresholds propose` shape)."""
+    return {
+        "phase": phase,
+        "kind": kind,
+        "current_threshold": current,
+        "proposed_threshold": proposed,
+        "selected_effort": selected_effort,
+        "executions": executions if kind in ("upgrade", "downgrade") else 0,
+        "success_rate": success_rate,
+        "tokens_per_success": tokens_per_success,
+        "success_floor": 0.8,
+        "min_executions": 5,
+        "note": f"{kind} for {phase}",
+    }
+
+
+def test_thresholds_payload_from_proposals_keeps_only_applyable_kinds() -> None:
+    proposals = [
+        _proposal("verify", "downgrade", 0.40, success_rate=0.92),
+        _proposal("explore", "upgrade", 0.72),
+        _proposal("tasks", "uphold", 0.50),
+        _proposal("apply", "insufficient_evidence", 0.50, success_rate=None),
+    ]
+    payload, evidence = promote_mod.thresholds_payload_from_proposals(proposals)
+    assert payload == {"explore": 0.72, "verify": 0.40}  # sorted by phase
+    assert set(evidence) == {"explore", "verify"}
+    assert evidence["explore"] == {
+        "kind": "upgrade",
+        "selected_effort": "low",
+        "executions": 12,
+        "success_rate": 0.85,
+        "tokens_per_success": 9000.0,
+    }
+    assert evidence["verify"]["kind"] == "downgrade"
+    assert evidence["verify"]["success_rate"] == 0.92
+
+
+def test_promote_thresholds_record_shape_and_evidence(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    proposals = [
+        _proposal("explore", "upgrade", 0.72),
+        _proposal("verify", "downgrade", 0.40, success_rate=0.92),
+        _proposal("tasks", "uphold", 0.50),  # dropped
+    ]
+    payload, _ = promote_mod.thresholds_payload_from_proposals(proposals)
+    outcome = promote_mod.promote_checkpoint(
+        None,
+        models_dir=models_dir,
+        thresholds=payload,
+        evidence=proposals,
+        source="proposals.json",
+    )
+    assert outcome.wrote and not outcome.dry_run
+    assert outcome.comparison is None  # compare is checkpoint-only
+
+    record = json.loads((models_dir / "promoted" / "promoted.json").read_text())
+    assert record["artifact_kind"] == "thresholds"
+    assert record["thresholds"] == {"explore": 0.72, "verify": 0.40}
+    assert record["source"] == "proposals.json"
+    assert record["promoted_by"] == "manual"
+    assert record["promoted_at"].endswith("+00:00")
+    assert set(record["evidence"]) == {"explore", "verify"}  # uphold dropped
+    assert record["evidence"]["explore"]["executions"] == 12
+    assert record["evidence"]["explore"]["success_rate"] == 0.85
+    assert not (models_dir / "promoted" / "metrics.json").exists()
+
+
+def test_promote_thresholds_dry_run_writes_nothing(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    outcome = promote_mod.promote_checkpoint(
+        None,
+        models_dir=models_dir,
+        thresholds={"explore": 0.72},
+        evidence=[_proposal("explore", "upgrade", 0.72)],
+        source="proposals.json",
+        dry_run=True,
+    )
+    assert not outcome.wrote and outcome.dry_run
+    assert outcome.record is None
+    assert not (models_dir / "promoted").exists()
+
+
+def test_promote_thresholds_validation_fails_closed(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    good_evidence = [_proposal("explore", "upgrade", 0.72)]
+    # missing source
+    with pytest.raises(promote_mod.PromotionError):
+        promote_mod.promote_checkpoint(
+            None, models_dir=models_dir, thresholds={"explore": 0.72}, evidence=good_evidence
+        )
+    # empty payload
+    with pytest.raises(promote_mod.PromotionError):
+        promote_mod.promote_checkpoint(
+            None, models_dir=models_dir, thresholds={}, source="s", evidence=[]
+        )
+    # out-of-range value
+    with pytest.raises(promote_mod.PromotionError):
+        promote_mod.promote_checkpoint(
+            None, models_dir=models_dir, thresholds={"explore": 1.5}, source="s"
+        )
+    # non-numeric value
+    with pytest.raises(promote_mod.PromotionError):
+        promote_mod.promote_checkpoint(
+            None, models_dir=models_dir, thresholds={"explore": "high"}, source="s"
+        )
+    # payload phase without proposal evidence
+    with pytest.raises(promote_mod.PromotionError):
+        promote_mod.promote_checkpoint(
+            None,
+            models_dir=models_dir,
+            thresholds={"verify": 0.40},
+            evidence=good_evidence,
+            source="s",
+        )
+
+
+def test_promote_thresholds_replaces_checkpoint_record_and_removes_metrics_copy(
+    tmp_path: Path,
+) -> None:
+    """One active record: a thresholds promotion replaces the checkpoint record."""
+    models_dir = tmp_path / "models"
+    ckpt = make_checkpoint(models_dir, "v1")
+    assert runner.invoke(app, _promote_args(models_dir, ckpt)).exit_code == 0
+    assert (models_dir / "promoted" / "metrics.json").is_file()
+
+    proposals = [_proposal("explore", "upgrade", 0.72)]
+    payload, _ = promote_mod.thresholds_payload_from_proposals(proposals)
+    assert (
+        promote_mod.promote_checkpoint(
+            None,
+            models_dir=models_dir,
+            thresholds=payload,
+            evidence=proposals,
+            source="proposals.json",
+        ).wrote
+    )
+    record = json.loads((models_dir / "promoted" / "promoted.json").read_text())
+    assert record["artifact_kind"] == "thresholds"
+    assert not (models_dir / "promoted" / "metrics.json").exists()
+    # and the next checkpoint promotion is a first promotion again (no stale compare)
+    v2 = make_checkpoint(models_dir, "v2", tokens_per_success=11_000.0)
+    result = runner.invoke(app, _promote_args(models_dir, v2))
+    assert result.exit_code == 0, result.output
+    record = json.loads((models_dir / "promoted" / "promoted.json").read_text())
+    assert record["artifact_kind"] == "checkpoint"
+    assert record["promoted_checkpoint"] == str(v2)
+
+
+def test_cli_promote_thresholds_from_proposals_file(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    proposals = [
+        _proposal("explore", "upgrade", 0.72),
+        _proposal("verify", "downgrade", 0.40, success_rate=0.92),
+        _proposal("tasks", "uphold", 0.50),
+    ]
+    proposals_path = tmp_path / "proposals.json"
+    proposals_path.write_text(json.dumps(proposals, indent=2) + "\n")
+
+    result = runner.invoke(
+        app, ["promote", "--thresholds", str(proposals_path), "--models-dir", str(models_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    record = json.loads((models_dir / "promoted" / "promoted.json").read_text())
+    assert record["artifact_kind"] == "thresholds"
+    assert record["thresholds"] == {"explore": 0.72, "verify": 0.40}
+    assert record["source"] == str(proposals_path)
+    assert set(record["evidence"]) == {"explore", "verify"}
+
+
+def test_cli_promote_thresholds_bandit_version_source_and_dry_run(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    doc = {
+        "bandit_version": "sha256:abc123",
+        "proposals": [_proposal("explore", "upgrade", 0.72)],
+    }
+    proposals_path = tmp_path / "proposals.json"
+    proposals_path.write_text(json.dumps(doc) + "\n")
+
+    result = runner.invoke(
+        app,
+        [
+            "promote",
+            "--thresholds",
+            str(proposals_path),
+            "--models-dir",
+            str(models_dir),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "dry-run" in result.output
+    assert not (models_dir / "promoted").exists()
+
+    result = runner.invoke(
+        app, ["promote", "--thresholds", str(proposals_path), "--models-dir", str(models_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    record = json.loads((models_dir / "promoted" / "promoted.json").read_text())
+    assert record["source"] == "bandit_version:sha256:abc123"
+
+
+def test_cli_promote_thresholds_no_applyable_proposals(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    proposals_path = tmp_path / "proposals.json"
+    proposals_path.write_text(json.dumps([_proposal("tasks", "uphold", 0.50)]) + "\n")
+    result = runner.invoke(
+        app, ["promote", "--thresholds", str(proposals_path), "--models-dir", str(models_dir)]
+    )
+    assert result.exit_code == 1
+    assert not (models_dir / "promoted").exists()
+
+
+def test_cli_status_thresholds_record(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    proposals = [_proposal("explore", "upgrade", 0.72), _proposal("verify", "downgrade", 0.40)]
+    promote_mod.promote_checkpoint(
+        None,
+        models_dir=models_dir,
+        thresholds={"explore": 0.72, "verify": 0.40},
+        evidence=proposals,
+        source="proposals.json",
+    )
+    result = runner.invoke(app, ["promote", "--status", "--models-dir", str(models_dir)])
+    assert result.exit_code == 0, result.output
+    assert "promoted thresholds" in result.output
+    assert "explore" in result.output and "verify" in result.output
+    assert "0.720" in result.output and "0.400" in result.output
+    assert "upgrade" in result.output and "downgrade" in result.output
+    assert "manual" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# Serving honors the promotion record
+# --------------------------------------------------------------------------- #
+
+
+def _write_record(models_dir: Path, record: dict) -> None:
+    promoted = models_dir / "promoted"
+    promoted.mkdir(parents=True, exist_ok=True)
+    (promoted / "promoted.json").write_text(json.dumps(record, indent=2) + "\n")
+
+
+def test_old_style_record_without_artifact_kind_is_checkpoint(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    ckpt = models_dir / "modernbert-router" / "v9"
+    ckpt.mkdir(parents=True)
+    (ckpt / "model.quant.onnx").write_bytes(b"fake")
+    _write_record(
+        models_dir,
+        {  # pre-artifact-kinds shape: no artifact_kind field
+            "promoted_checkpoint": str(ckpt),
+            "metrics_path": str(models_dir / "promoted" / "metrics.json"),
+            "promotion_reason": "legacy",
+            "promoted_at": "2026-01-01T00:00:00+00:00",
+            "git_commit": "abcdef0",
+            "promoted_by": "manual",
+        },
+    )
+    current = promote_mod.load_promoted(models_dir)
+    assert current is not None
+    assert promote_mod.artifact_kind_of(current["record"]) == "checkpoint"
+    assert promote_mod.resolve_promoted_onnx(models_dir) == ckpt / "model.quant.onnx"
+    result = runner.invoke(app, ["promote", "--status", "--models-dir", str(models_dir)])
+    assert result.exit_code == 0
+    assert "checkpoint" in result.output
+
+
+def test_resolve_promoted_onnx_prefers_quant_then_falls_back(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    ckpt = models_dir / "modernbert-router" / "v10"
+    ckpt.mkdir(parents=True)
+    _write_record(
+        models_dir,
+        {"artifact_kind": "checkpoint", "promoted_checkpoint": str(ckpt)},
+    )
+    # no ONNX yet -> fail closed
+    with pytest.raises(promote_mod.PromotionError):
+        promote_mod.resolve_promoted_onnx(models_dir)
+    (ckpt / "model.onnx").write_bytes(b"fake")
+    assert promote_mod.resolve_promoted_onnx(models_dir) == ckpt / "model.onnx"
+    (ckpt / "model.quant.onnx").write_bytes(b"fake")  # preferred once present
+    assert promote_mod.resolve_promoted_onnx(models_dir) == ckpt / "model.quant.onnx"
+
+
+def test_resolve_promoted_onnx_fail_closed_and_kind_aware(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    # no record at all -> None (serve unranked, deterministic baseline)
+    assert promote_mod.resolve_promoted_onnx(models_dir) is None
+    # missing checkpoint dir -> fail closed
+    _write_record(
+        models_dir,
+        {"artifact_kind": "checkpoint", "promoted_checkpoint": str(models_dir / "gone")},
+    )
+    with pytest.raises(promote_mod.PromotionError):
+        promote_mod.resolve_promoted_onnx(models_dir)
+    # thresholds record -> no served checkpoint
+    _write_record(models_dir, {"artifact_kind": "thresholds", "thresholds": {"explore": 0.7}})
+    assert promote_mod.resolve_promoted_onnx(models_dir) is None
+    # unknown kind -> fail closed
+    _write_record(models_dir, {"artifact_kind": "mystery"})
+    with pytest.raises(promote_mod.PromotionError):
+        promote_mod.resolve_promoted_onnx(models_dir)
+
+
+def test_cli_status_checkpoint_record_shows_artifact_kind(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    ckpt = make_checkpoint(models_dir, "v1")
+    assert runner.invoke(app, _promote_args(models_dir, ckpt)).exit_code == 0
+    result = runner.invoke(app, ["promote", "--status", "--models-dir", str(models_dir)])
+    assert result.exit_code == 0
+    assert "checkpoint" in result.output
+
+
+class _FakeOnnxRanker:
+    """Records constructor args instead of loading a real ONNX session."""
+
+    calls: list = []
+
+    def __init__(self, checkpoint, model_path=None, **kwargs) -> None:
+        type(self).calls.append((Path(checkpoint), Path(model_path) if model_path else None))
+
+
+def _patch_ranker_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+    _FakeOnnxRanker.calls = []
+    monkeypatch.setattr(
+        "gentle_ai_model_router.training.onnx_export.OnnxRanker", _FakeOnnxRanker
+    )
+
+
+def test_serve_resolves_ranker_from_promotion_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models_dir = tmp_path / "models"
+    ckpt = make_checkpoint(models_dir, "v1")
+    assert runner.invoke(app, _promote_args(models_dir, ckpt)).exit_code == 0
+    (ckpt / "model.quant.onnx").write_bytes(b"fake")
+    _patch_ranker_loading(monkeypatch)
+    import uvicorn
+
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+
+    result = runner.invoke(
+        app, ["serve", "--data-dir", str(tmp_path / "data"), "--models-dir", str(models_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert _FakeOnnxRanker.calls == [(ckpt, ckpt / "model.quant.onnx")]
+
+
+def test_serve_ranker_explicit_override_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models_dir = tmp_path / "models"
+    ckpt = make_checkpoint(models_dir, "v1")
+    assert runner.invoke(app, _promote_args(models_dir, ckpt)).exit_code == 0
+    (ckpt / "model.quant.onnx").write_bytes(b"fake")
+    _patch_ranker_loading(monkeypatch)
+    import uvicorn
+
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    explicit = tmp_path / "explicit.onnx"
+    explicit.write_bytes(b"fake")
+
+    result = runner.invoke(
+        app,
+        [
+            "serve",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--models-dir",
+            str(models_dir),
+            "--ranker",
+            str(explicit),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert _FakeOnnxRanker.calls == [(explicit.parent, explicit)]
+
+
+def test_serve_fail_closed_when_record_points_to_missing_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models_dir = tmp_path / "models"
+    ckpt = make_checkpoint(models_dir, "v1")
+    assert runner.invoke(app, _promote_args(models_dir, ckpt)).exit_code == 0
+    import shutil
+
+    shutil.rmtree(ckpt)  # record now points to a missing artifact
+    _patch_ranker_loading(monkeypatch)
+    import uvicorn
+
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+
+    result = runner.invoke(
+        app, ["serve", "--data-dir", str(tmp_path / "data"), "--models-dir", str(models_dir)]
+    )
+    assert result.exit_code == 2, result.output
+    assert "missing checkpoint" in result.output
+    assert _FakeOnnxRanker.calls == []
+
+
 def test_cli_promote_with_dataset_requires_train_extra(tmp_path: Path) -> None:
     """The --dataset path loads the checkpoint -> [train] extra; skip without it.
 

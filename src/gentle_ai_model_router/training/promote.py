@@ -10,15 +10,32 @@ promoted checkpoint on the business-metric set:
   ``epsilon`` (absolute, default 0.02);
 - ranking metrics (``ndcg@5``, ``mrr``) are informational in the report.
 
-Promotion record layout (``models/`` is gitignored; dirs are created as
-needed):
+The promotion record is generalized over artifact kinds
+(``artifact_kind`` field, ``"checkpoint"`` | ``"thresholds"``):
 
-- ``models/promoted/promoted.json`` — the promotion record:
-  ``{promoted_checkpoint, metrics_path, promotion_reason, promoted_at,
-  git_commit, promoted_by: "manual"}``;
-- ``models/promoted/metrics.json`` — a full COPY of the promoted checkpoint's
-  ``metrics.json`` (design choice: a copy, not a pointer — the record stays
-  self-contained even if the checkpoint dir is later deleted or moved).
+- ``artifact_kind: "checkpoint"`` (today's behavior, the default) — the
+  record points at a candidate checkpoint dir:
+  ``{artifact_kind, promoted_checkpoint, metrics_path, promotion_reason,
+  promoted_at, git_commit, promoted_by: "manual"}``;
+- ``artifact_kind: "thresholds"`` — the record carries a promoted per-phase
+  ``threshold_quality`` payload ``{phase: value}`` plus filtered evidence
+  (only ``upgrade``/``downgrade`` threshold-tune proposals, with
+  executions/success_rate per phase) and a ``source`` reference (the
+  proposals JSON path or a ``bandit_version`` label). The checkpoint
+  guardrail comparison does NOT apply to thresholds: ``compare()`` is
+  checkpoint-only (tokens_per_success primary + guardrails); threshold
+  promotions record evidence but never run a metric comparison.
+
+There is exactly ONE active record: promoting a thresholds payload replaces
+a checkpoint record and vice versa (NEVER auto-replaced — every promotion is
+an explicit manual action, dry-run first).
+
+Checkpoint records additionally keep
+``models/promoted/metrics.json`` — a full COPY of the promoted checkpoint's
+``metrics.json`` (design choice: a copy, not a pointer — the record stays
+self-contained even if the checkpoint dir is later deleted or moved). A
+thresholds promotion removes that copy: the metrics copy belongs to the
+checkpoint record only, and a stale one must never feed a later comparison.
 
 Both files are written atomically (tmp file + ``os.replace``). Train-loss-only
 checkpoints are NEVER eligible: without ``--dataset`` the checkpoint must
@@ -45,6 +62,22 @@ DEFAULT_EPSILON = 0.02
 PROMOTED_SUBDIR = "promoted"
 RECORD_FILENAME = "promoted.json"
 METRICS_FILENAME = "metrics.json"
+
+# Artifact kinds the promotion record can carry. "checkpoint" is today's
+# behavior and the DEFAULT: records written before artifact kinds existed
+# have no artifact_kind field and are treated as checkpoints.
+ARTIFACT_KIND_CHECKPOINT = "checkpoint"
+ARTIFACT_KIND_THRESHOLDS = "thresholds"
+ARTIFACT_KINDS = (ARTIFACT_KIND_CHECKPOINT, ARTIFACT_KIND_THRESHOLDS)
+
+# Threshold-tune proposal kinds that may be promoted; uphold /
+# insufficient_evidence proposals never change a threshold and are dropped
+# from the promoted evidence (same rule the router.yaml applier uses).
+APPLYABLE_PROPOSAL_KINDS = ("upgrade", "downgrade")
+
+# ONNX file names resolved from a promoted checkpoint dir, most preferred
+# first (INT8-quantized before fp32 fallback).
+PREFERRED_ONNX_FILES = ("model.quant.onnx", "model.onnx")
 
 # Provenance fields a checkpoint must carry before it can be promoted.
 PROVENANCE_FIELDS = ("dataset.version", "source_snapshot_ids", "label_provenance")
@@ -78,7 +111,7 @@ class Comparison:
 
 @dataclass
 class PromotionOutcome:
-    comparison: Comparison
+    comparison: Comparison | None  # None for thresholds (compare is checkpoint-only)
     record: dict[str, Any] | None  # promotion record actually written
     wrote: bool
     dry_run: bool
@@ -158,7 +191,12 @@ def compare(
     metric: str = PRIMARY_METRIC,
     epsilon: float = DEFAULT_EPSILON,
 ) -> Comparison:
-    """Decide promote vs keep. Pure: no I/O, no clocks, fully deterministic."""
+    """Decide promote vs keep for CHECKPOINTS. Pure: no I/O, no clocks.
+
+    Checkpoint-only by design: the tokens_per_success primary metric and
+    success_rate/mean_quality guardrails compare two ranker evaluations.
+    Threshold promotions carry evidence instead and never pass through here.
+    """
     if metric != PRIMARY_METRIC:
         raise PromotionError(
             f"unsupported primary metric '{metric}' (only '{PRIMARY_METRIC}' is defined)"
@@ -249,6 +287,120 @@ def load_promoted(models_dir: str | Path) -> dict[str, Any] | None:
     return {"record": record, "metrics": metrics}
 
 
+def artifact_kind_of(record: dict[str, Any]) -> str:
+    """Artifact kind of a promotion record (backward compatible).
+
+    Records written before artifact kinds existed have no ``artifact_kind``
+    field; they are treated as ``"checkpoint"``. Unknown kinds fail closed —
+    a record we do not understand must never silently drive serving.
+    """
+    kind = record.get("artifact_kind", ARTIFACT_KIND_CHECKPOINT)
+    if kind not in ARTIFACT_KINDS:
+        raise PromotionError(f"unknown artifact_kind in promotion record: {kind!r}")
+    return kind
+
+
+# --------------------------------------------------------------------------- #
+# Thresholds artifact payloads
+# --------------------------------------------------------------------------- #
+
+
+def thresholds_payload_from_proposals(
+    proposals: list[dict[str, Any]],
+) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
+    """Build a ``{phase: threshold_quality}`` payload + evidence from proposals.
+
+    ``proposals`` are threshold-tune proposal dicts (the JSON shape
+    ``router thresholds propose`` prints: ``dataclasses.asdict`` of
+    :class:`~gentle_ai_model_router.router.threshold_tune.ThresholdProposal`).
+    Only ``upgrade``/``downgrade`` kinds are kept — ``uphold`` and
+    ``insufficient_evidence`` proposals never change a threshold. Evidence
+    retains the measured executions / success_rate per promoted phase.
+
+    Deterministic: phases are processed in sorted order.
+    """
+    payload: dict[str, float] = {}
+    evidence: dict[str, dict[str, Any]] = {}
+    for proposal in sorted(proposals, key=lambda p: str(p.get("phase", ""))):
+        if proposal.get("kind") not in APPLYABLE_PROPOSAL_KINDS:
+            continue
+        phase = proposal.get("phase")
+        if not isinstance(phase, str) or not phase:
+            raise PromotionError(
+                f"threshold proposal carries no phase name: {proposal!r}"
+            )
+        proposed = proposal.get("proposed_threshold")
+        if isinstance(proposed, bool) or not isinstance(proposed, (int, float)):
+            raise PromotionError(
+                f"threshold proposal for phase {phase!r} carries a non-numeric "
+                f"proposed_threshold: {proposed!r}"
+            )
+        payload[phase] = float(proposed)
+        evidence[phase] = {
+            "kind": proposal.get("kind"),
+            "selected_effort": proposal.get("selected_effort"),
+            "executions": proposal.get("executions", 0),
+            "success_rate": proposal.get("success_rate"),
+            "tokens_per_success": proposal.get("tokens_per_success"),
+        }
+    return payload, evidence
+
+
+def validate_thresholds_payload(thresholds: dict[str, Any]) -> dict[str, float]:
+    """Validate + normalize a ``{phase: threshold_quality}`` payload.
+
+    Values must be plain numbers in [0, 1] (threshold_quality is a quality
+    floor on the policy's 0..1 scale). Fails closed on any deviation.
+    """
+    if not isinstance(thresholds, dict) or not thresholds:
+        raise PromotionError("thresholds payload must be a non-empty {phase: value} mapping")
+    normalized: dict[str, float] = {}
+    for phase, value in thresholds.items():
+        if not isinstance(phase, str) or not phase:
+            raise PromotionError(f"threshold phase names must be non-empty strings: {phase!r}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise PromotionError(
+                f"threshold for phase {phase!r} must be a number, got {value!r}"
+            )
+        if not 0.0 <= float(value) <= 1.0:
+            raise PromotionError(
+                f"threshold for phase {phase!r} must be in [0, 1], got {value!r}"
+            )
+        normalized[phase] = float(value)
+    return dict(sorted(normalized.items()))
+
+
+def resolve_promoted_onnx(models_dir: str | Path = "models") -> Path | None:
+    """ONNX file of the promoted checkpoint, per the promotion record.
+
+    Resolution: active record (``artifact_kind=checkpoint``) → its checkpoint
+    dir → ``model.quant.onnx`` preferred, ``model.onnx`` fallback.
+
+    Returns None when no checkpoint is promoted (no record at all, or the
+    active record is a thresholds promotion). Raises PromotionError when the
+    record points to a MISSING artifact (checkpoint dir gone, or no ONNX
+    file inside it) — serving must fail closed, never guess a path.
+    """
+    current = load_promoted(models_dir)
+    if current is None:
+        return None
+    if artifact_kind_of(current["record"]) != ARTIFACT_KIND_CHECKPOINT:
+        return None
+    checkpoint = Path(current["record"]["promoted_checkpoint"])
+    if not checkpoint.is_dir():
+        raise PromotionError(
+            f"promotion record points to a missing checkpoint dir: {checkpoint}"
+        )
+    for name in PREFERRED_ONNX_FILES:
+        candidate = checkpoint / name
+        if candidate.is_file():
+            return candidate
+    raise PromotionError(
+        f"promoted checkpoint {checkpoint} contains none of "
+        f"{', '.join(PREFERRED_ONNX_FILES)} — refusing to serve a missing artifact"
+    )
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
@@ -276,7 +428,7 @@ def _evaluate_candidate(
 
 
 def promote_checkpoint(
-    candidate: str | Path,
+    candidate: str | Path | None = None,
     *,
     models_dir: str | Path = "models",
     dataset: str | Path | None = None,
@@ -284,11 +436,36 @@ def promote_checkpoint(
     metric: str = PRIMARY_METRIC,
     epsilon: float = DEFAULT_EPSILON,
     dry_run: bool = False,
+    thresholds: dict[str, Any] | None = None,
+    evidence: list[dict[str, Any]] | None = None,
+    source: str | None = None,
 ) -> PromotionOutcome:
-    """Run the full promotion workflow for one candidate checkpoint.
+    """Run the full promotion workflow for one artifact.
+
+    Two artifact kinds (mutually exclusive):
+
+    - ``candidate`` (default): a checkpoint dir, promoted only when its eval
+      beats the active checkpoint via :func:`compare` (guardrails unchanged).
+    - ``thresholds``: a ``{phase: threshold_quality}`` payload promoted with
+      measured evidence and a ``source`` reference. No metric comparison —
+      evidence is recorded as-is. ``evidence`` accepts threshold-tune
+      proposal dicts; only upgrade/downgrade kinds are retained.
+
+    Same safety rules for both kinds: dry-run first, NEVER auto-replace,
+    ``promoted_by: "manual"``, atomic write.
 
     Raises PromotionError on any validation failure (caller maps it to exit 2).
     """
+    if thresholds is not None:
+        return _promote_thresholds(
+            thresholds,
+            evidence=evidence,
+            source=source,
+            models_dir=models_dir,
+            dry_run=dry_run,
+        )
+    if candidate is None:
+        raise PromotionError("either --candidate or --thresholds is required")
     candidate = Path(candidate)
     if not candidate.is_dir():
         raise PromotionError(f"candidate checkpoint not found: {candidate}")
@@ -319,7 +496,12 @@ def promote_checkpoint(
             )
 
     current = load_promoted(models_dir)
-    promoted_eval = extract_eval(current["metrics"]) if current is not None else None
+    # Only a checkpoint record can be compared against: a thresholds record
+    # promotes floors, not a ranker, and any stale metrics copy it may have
+    # inherited must never feed the guardrail comparison.
+    promoted_eval = None
+    if current is not None and artifact_kind_of(current["record"]) == ARTIFACT_KIND_CHECKPOINT:
+        promoted_eval = extract_eval(current["metrics"])
     comparison = compare(candidate_eval, promoted_eval, metric=metric, epsilon=epsilon)
 
     if comparison.decision == "keep":
@@ -329,6 +511,7 @@ def promote_checkpoint(
 
     out_dir = promoted_dir(models_dir)
     record = {
+        "artifact_kind": ARTIFACT_KIND_CHECKPOINT,
         "promoted_checkpoint": str(candidate),
         "metrics_path": str(out_dir / METRICS_FILENAME),
         "promotion_reason": "; ".join(comparison.reasons),
@@ -340,3 +523,62 @@ def promote_checkpoint(
     _atomic_write_json(record_path, record)
     _atomic_write_json(out_dir / METRICS_FILENAME, metrics)
     return PromotionOutcome(comparison, record, wrote=True, dry_run=False, record_path=record_path)
+
+
+def _promote_thresholds(
+    thresholds: dict[str, Any],
+    *,
+    evidence: list[dict[str, Any]] | None,
+    source: str | None,
+    models_dir: str | Path,
+    dry_run: bool,
+) -> PromotionOutcome:
+    """Thresholds promotion: evidence-backed payload, no metric comparison.
+
+    Records the payload with per-phase measured evidence (executions /
+    success_rate) and a ``source`` reference so the promotion stays
+    traceable. NEVER auto-replaces: same record slot as checkpoints, but the
+    caller must still pass ``dry_run=True`` first by convention.
+    """
+    payload = validate_thresholds_payload(thresholds)
+    if not isinstance(source, str) or not source.strip():
+        raise PromotionError(
+            "a thresholds promotion requires a source reference "
+            "(proposals JSON path or bandit_version) — refusing an untraceable promotion"
+        )
+    filtered: dict[str, dict[str, Any]] = {}
+    if evidence is not None:
+        _payload, filtered = thresholds_payload_from_proposals(evidence)
+        # Evidence documents the payload: every promoted phase must carry it.
+        unknown = sorted(set(payload) - set(filtered))
+        if unknown:
+            raise PromotionError(
+                "thresholds payload has no matching proposal evidence for phase(s): "
+                + ", ".join(unknown)
+            )
+
+    if dry_run:
+        return PromotionOutcome(None, None, wrote=False, dry_run=True, record_path=None)
+
+    out_dir = promoted_dir(models_dir)
+    record = {
+        "artifact_kind": ARTIFACT_KIND_THRESHOLDS,
+        "thresholds": payload,
+        "evidence": filtered,
+        "source": source,
+        "promotion_reason": (
+            f"thresholds promotion from {source}: "
+            + ", ".join(f"{phase}={value:.3f}" for phase, value in payload.items())
+        ),
+        "promoted_at": datetime.now(UTC).isoformat(),
+        "git_commit": _git_commit(),
+        "promoted_by": "manual",
+    }
+    record_path = out_dir / RECORD_FILENAME
+    _atomic_write_json(record_path, record)
+    # The metrics copy belongs to a checkpoint record only; remove any stale
+    # copy so the promoted dir always matches the active record kind.
+    stale_metrics = out_dir / METRICS_FILENAME
+    if stale_metrics.is_file():
+        stale_metrics.unlink()
+    return PromotionOutcome(None, record, wrote=True, dry_run=False, record_path=record_path)

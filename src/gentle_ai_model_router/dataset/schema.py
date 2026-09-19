@@ -1,10 +1,12 @@
 """Dataset V1 schema: examples, preference pairs, manifest.
 
-HONESTY RULE (docs/training.md): every label produced by the builder today is
-a **bootstrap prior** derived from external benchmark data — NOT ground truth.
-There is (almost) no real execution telemetry yet. ``label_provenance`` makes
-this explicit per row, and the manifest carries a loud provenance statement so
-no downstream consumer can mistake priors for measured outcomes.
+HONESTY RULE (docs/training.md): by default every label produced by the
+builder is a **bootstrap prior** derived from external benchmark data — NOT
+ground truth. The optional telemetry bridge (dataset/telemetry_bridge.py)
+can add rows with label_provenance='telemetry' carrying measured shim
+outcomes. ``label_provenance`` makes the distinction explicit per row, and
+the manifest carries a loud provenance statement so no downstream consumer
+can mistake priors for measured outcomes.
 """
 
 from __future__ import annotations
@@ -12,11 +14,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-FEATURE_SCHEMA_VERSION = "1"
+FEATURE_SCHEMA_VERSION = "2"
 NORMALIZATION_VERSION = "1"  # internal effort taxonomy (registry/normalize.py)
 PROVENANCE_BOOTSTRAP = "bootstrap_prior"
 PROVENANCE_TELEMETRY = "telemetry"
 PROVENANCE_EMPIRICAL = "empirical_benchmark"
+
+# Schema history (cost_features key set is part of the version):
+# - v1: est_input_tokens, est_output_tokens, est_total_tokens, est_cost.
+# - v2: adds OPTIONAL actual_input_tokens, actual_output_tokens,
+#   actual_total_tokens, actual_cost, latency_ms. These are populated on
+#   telemetry-provenance rows (real measured shim values) and None on
+#   bootstrap/empirical rows. v1 datasets still load: the loader keeps only
+#   present keys, and consumers read est_* keys that exist in every version.
+# Parquet note: within one written dataset every row carries the SAME key set
+# (None where unmeasured) because pyarrow infers the struct type from the
+# first rows — heterogeneous dicts would silently drop keys.
 
 # Fixed-width numeric vectors. Order is part of FEATURE_SCHEMA_VERSION.
 MODEL_FEATURE_NAMES: tuple[str, ...] = (
@@ -58,9 +71,14 @@ class DatasetExample:
     model_features: list[float]
     benchmark_features: list[float]  # width = len(benchmark feature names)
     benchmark_feature_names: tuple[str, ...]
-    # cost keys: est_input_tokens, est_output_tokens, est_total_tokens, est_cost
-    cost_features: dict[str, float]
+    # cost keys (schema v1): est_input_tokens, est_output_tokens,
+    # est_total_tokens, est_cost. Schema v2 adds optional actual_* keys and
+    # latency_ms (float, milliseconds) on telemetry-provenance rows; None on
+    # rows without measurements.
+    cost_features: dict[str, float | None]
     label_utility: float  # 0..1
+    # bootstrap/empirical rows: quality model estimate; telemetry rows:
+    # MEASURED outcome (quality_score, or task_success coerced to 0.0/1.0).
     label_quality_estimate: float  # 0..1
     label_provenance: str  # PROVENANCE_BOOTSTRAP | PROVENANCE_TELEMETRY | PROVENANCE_EMPIRICAL
     snapshot_date: str  # ISO date: max date of this example's source snapshots
@@ -100,6 +118,10 @@ class DatasetV1:
     created_at: str = ""
     # Anti-leakage bookkeeping (surfaced in the manifest).
     dropped_train_task_overlap: int = 0
+    # Telemetry bridge bookkeeping (empty unless the bridge was enabled):
+    # read = scored shim rows seen, emitted = telemetry examples produced,
+    # skipped = invalid rows dropped with a counted warning.
+    telemetry_stats: dict[str, int] = field(default_factory=dict)
     # Quality threshold conditioning:
     threshold_penalty: float = 0.0
     hard_threshold: bool = False
@@ -125,7 +147,7 @@ class DatasetV1:
         else:
             label_prov = "+".join(provenances)
 
-        return {
+        manifest = {
             "dataset_version": self.version,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "normalization_version": NORMALIZATION_VERSION,
@@ -145,7 +167,9 @@ class DatasetV1:
             "threshold_penalty": self.threshold_penalty,
             "hard_threshold": self.hard_threshold,
         }
-
+        if self.telemetry_stats:
+            manifest["telemetry"] = dict(self.telemetry_stats)
+        return manifest
 
 PROVENANCE_STATEMENT = (
     "ALL labels in this dataset are BOOTSTRAP PRIORS derived from external "
@@ -157,4 +181,16 @@ PROVENANCE_STATEMENT = (
     "labels as an internal-consistency check, never as expected production "
     "quality. Replace with telemetry-derived labels (label_provenance="
     "'telemetry') as soon as the shim data exists."
+)
+
+# Appended to PROVENANCE_STATEMENT when the dataset mixes in telemetry rows.
+TELEMETRY_PROVENANCE_ADDENDUM = (
+    "ADDENDUM (telemetry rows): rows with label_provenance='telemetry' carry "
+    "MEASURED outcomes from the router-owned telemetry shim (actual "
+    "tokens/latency in cost_features actual_* keys; utility computed with "
+    "actual total tokens, threshold-conditioned exactly like the bootstrap "
+    "labels). They are real executions, not priors — but volume may be small "
+    "and phase-biased toward whatever the router actually routed. Bootstrap "
+    "and telemetry rows are comparable by construction (same utility "
+    "formula); keep provenance per row when slicing metrics."
 )

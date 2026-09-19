@@ -78,10 +78,8 @@ Commit per work unit on a feature branch.
   cost/tokens/latency fields are added).
 - [x] **T6** — Pi adapter ✅ 427f48c (31 tests; models.json chain, object-form
   writes, atomic+backup+rollback, `router integrate pi`)
-- [ ] **T7** — Codex adapter (state-file route): extend gentle-state-style writing
-  to `CodexModelAssignments` / `CodexPhaseModelAssignments` /
-  `CodexCarrilModelAssignments`; effort-subset mapping (low|medium|high|xhigh);
-  CLI `router integrate codex`; document direct-TOML route as unsupported.
+- [x] **T7** — Codex adapter ✅ ee2b534 (50 tests; state-file route, underscore
+  keys, carriles, total effort map, `router integrate codex`)
 - [ ] **T8** — Docs: update `README.md` roadmap status, `docs/runbook.md`,
   `docs/telemetry-shim.md` status lines for phase 4 components.
 
@@ -97,6 +95,5 @@ Commit per work unit on a feature branch.
 
 ## Progress log
 
-- 2026-09-19 — T6 done in 427f48c (Pi adapter). Suite 298 passed; assess
-  medium; spot check 31/31. Deviation accepted: bare-string upgrade writes the
-  requested model (same convention as gentle-state adapter). Next: T7 Codex.
+- 2026-09-19 — T7 done in ee2b534 (Codex adapter). Suite 348 passed; assess
+  medium; spot check 50/50. Next: T5 dataset bridge.

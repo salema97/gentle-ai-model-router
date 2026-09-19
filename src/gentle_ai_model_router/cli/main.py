@@ -1464,6 +1464,12 @@ def build_dataset(
     max_empirical_tasks: int = typer.Option(
         30, "--max-empirical-tasks", help="Max empirical tasks per phase."
     ),
+    telemetry_db: str | None = typer.Option(
+        None,
+        "--telemetry-db",
+        help="Enable the telemetry bridge: shim SQLite DB path (an empty value "
+        "falls back to the config telemetry_url). Off by default.",
+    ),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
 ) -> None:
@@ -1506,7 +1512,9 @@ def build_dataset(
     registry_db.init_schema(engine)
     try:
         with registry_db.Session(engine) as session:
-            dataset = build_examples(session, config, builder, store=store)
+            dataset = build_examples(
+                session, config, builder, store=store, telemetry_db=telemetry_db
+            )
             out_dir = write_dataset(dataset, config.data_dir, builder=builder)
     except DatasetBuildError as exc:
         err_console.print(f"[red]error: {exc}[/red]")
@@ -1519,6 +1527,19 @@ def build_dataset(
     table.add_row("pairs", str(manifest["pair_count"]))
     table.add_row("split_counts", json.dumps(manifest["split_counts"]))
     table.add_row("pair_split_counts", json.dumps(manifest["pair_split_counts"]))
+    if telemetry_db is not None:
+        stats = manifest.get("telemetry", {})
+        table.add_row("telemetry", json.dumps(stats))
+        if stats.get("skipped"):
+            err_console.print(
+                f"[yellow]WARNING: skipped {stats['skipped']} invalid telemetry "
+                "row(s) — see build log.[/yellow]"
+            )
+        if stats.get("emitted"):
+            err_console.print(
+                f"[dim]telemetry: {stats['emitted']} measured row(s) "
+                f"(skipped {stats.get('skipped', 0)} invalid).[/dim]"
+            )
     console.print(table)
     err_console.print("[yellow]WARNING: labels are bootstrap priors, not ground truth —[/yellow]")
     err_console.print("[yellow]see manifest.json label_provenance_statement.[/yellow]")

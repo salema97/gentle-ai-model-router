@@ -46,10 +46,17 @@ from gentle_ai_model_router.dataset.schema import (
     PROVENANCE_BOOTSTRAP,
     PROVENANCE_EMPIRICAL,
     PROVENANCE_STATEMENT,
+    PROVENANCE_TELEMETRY,
+    TELEMETRY_PROVENANCE_ADDENDUM,
     CandidateRef,
     DatasetExample,
     DatasetV1,
     PreferencePair,
+)
+from gentle_ai_model_router.dataset.telemetry_bridge import (
+    TelemetryExecution,
+    TelemetryReadError,
+    read_telemetry_executions,
 )
 from gentle_ai_model_router.registry.models import (
     Deployment,
@@ -118,6 +125,48 @@ class DatasetBuilderConfig(BaseModel):
 # --------------------------------------------------------------------------- #
 # Internal helpers
 # --------------------------------------------------------------------------- #
+
+
+def _utility_label(
+    quality: float,
+    total_tokens: float,
+    max_group_tokens: float,
+    *,
+    cost_weight: float,
+    threshold: float,
+    threshold_penalty: float,
+    hard_threshold: bool,
+) -> float:
+    """Threshold-conditioned utility label shared by ALL provenances.
+
+    Bootstrap rows pass ESTIMATED tokens, telemetry rows pass ACTUAL tokens;
+    the formula is identical so labels stay comparable across provenances:
+    utility = clip(quality - cost_weight * tokens / max_group_tokens
+                    - (threshold_penalty if below floor), 0, 1), or 0.0
+    outright under a hard threshold.
+    """
+    penalty = cost_weight * total_tokens / max_group_tokens if max_group_tokens else 0.0
+    below_threshold = quality < threshold
+    if below_threshold and hard_threshold:
+        return 0.0
+    fail_penalty = threshold_penalty if below_threshold else 0.0
+    return max(0.0, min(1.0, quality - penalty - fail_penalty))
+
+
+def _temporal_split(
+    example_date: date,
+    first_seen_date: date,
+    train_end: date,
+    val_end: date | None,
+) -> str:
+    """Temporal split assignment (never random), shared by all provenances."""
+    if first_seen_date > train_end:
+        return "temporal_test"
+    if example_date < train_end:
+        return "train"
+    if val_end is not None and example_date < val_end:
+        return "validation"
+    return "test"
 
 
 def _git_commit() -> str:
@@ -493,6 +542,49 @@ def _match_candidate_model(
     return False, 0.5, None
 
 
+def _resolve_telemetry_candidate(
+    raw: list[tuple[Model, Provider, Deployment, ModelVariant]],
+    model_name: str,
+    deployment_ref: str | None,
+    effort: str | None,
+) -> tuple[Model, Provider, Deployment, ModelVariant] | None:
+    """Map a telemetry execution's free-text candidate to exactly one registry row.
+
+    Strict canonical-id match first, case-insensitive name fallback; an
+    explicitly recorded deployment/effort must match exactly (otherwise the
+    row is ambiguous → None → skipped with a counted warning). Missing
+    deployment/effort resolve to the first registry row in the build's
+    deterministic (canonical, deployment, effort) ordering.
+    """
+    matches = [row for row in raw if row[0].canonical_id == model_name]
+    if not matches:
+        low = model_name.strip().lower()
+        matches = [
+            row
+            for row in raw
+            if row[0].canonical_id.strip().lower() == low
+            or (row[0].name or "").strip().lower() == low
+        ]
+    if not matches:
+        return None
+    if deployment_ref:
+        selected = [row for row in matches if row[2].deployment_ref == deployment_ref]
+        if not selected:
+            low = deployment_ref.strip().lower()
+            selected = [
+                row for row in matches if row[2].deployment_ref.strip().lower() == low
+            ]
+        if not selected:
+            return None
+        matches = selected
+    if effort:
+        selected = [row for row in matches if row[3].effort == effort]
+        if not selected:
+            return None
+        matches = selected
+    return matches[0]
+
+
 # --------------------------------------------------------------------------- #
 # Build
 # --------------------------------------------------------------------------- #
@@ -503,8 +595,18 @@ def build_examples(
     config: RouterConfig,
     builder: DatasetBuilderConfig,
     store: SnapshotStore | None = None,
+    telemetry_db: str | None = None,
 ) -> DatasetV1:
-    """Generate DatasetV1 from registry priors. Deterministic; no randomness."""
+    """Generate DatasetV1 from registry priors. Deterministic; no randomness.
+
+    ``telemetry_db`` enables the optional telemetry bridge (path to the shim
+    SQLite DB, or a falsy string to use ``config.telemetry_url``). Off by
+    default: without it the output is byte-identical to a bootstrap-only
+    build. When on, scored shim executions are added as
+    ``label_provenance='telemetry'`` rows (see dataset/telemetry_bridge.py);
+    invalid rows are skipped with a counted warning, an unreadable DB is a
+    typed DatasetBuildError, and an absent DB yields zero telemetry rows.
+    """
     if store is None:
         store = SnapshotStore(config.data_dir / "snapshots")
     snapshot_dates = _snapshot_dates(session)
@@ -515,6 +617,18 @@ def build_examples(
         )
     as_of = builder.as_of or max(snapshot_dates.values())
     policy = config.policy
+
+    # --- optional telemetry bridge (read early; fail closed before staging) - #
+    telemetry_rows: list[TelemetryExecution] = []
+    if telemetry_db is not None:
+        url = telemetry_db or config.telemetry_url
+        if "://" not in url:
+            url = f"sqlite:///{url}"
+        try:
+            telemetry_rows = read_telemetry_executions(url).rows
+        except TelemetryReadError as exc:
+            raise DatasetBuildError(str(exc)) from exc
+        logger.info("telemetry bridge: %d scored shim row(s) read", len(telemetry_rows))
 
     # --- candidates ------------------------------------------------------- #
     stmt = (
@@ -828,38 +942,204 @@ def build_examples(
                         )
                         staged.append((example, model.id))
 
-    for example, mid in staged:
-        max_tokens = group_tokens[(example.phase, example.task_id)]
-        penalty = (
-            builder.cost_weight * example.cost_features["est_total_tokens"] / max_tokens
-            if max_tokens
-            else 0.0
-        )
-        threshold = config.phase_config(example.phase).threshold_quality
-        below_threshold = example.label_quality_estimate < threshold
-        if below_threshold and builder.hard_threshold:
-            example.label_utility = 0.0
-        else:
-            fail_penalty = builder.threshold_penalty if below_threshold else 0.0
-            example.label_utility = max(
-                0.0, min(1.0, example.label_quality_estimate - penalty - fail_penalty)
+    # --- telemetry executions (additive; utility filled after group maxima) - #
+    staged_tel: list[tuple[DatasetExample, int]] = []  # (example, model_id)
+    telemetry_group_tokens: dict[tuple[str, str], float] = {}
+    telemetry_skipped = 0
+    if telemetry_db is not None:
+        for trow in telemetry_rows:
+            skip_reason: str | None = None
+            resolved: tuple[Model, Provider, Deployment, ModelVariant] | None = None
+            quality = 0.0
+            if trow.phase not in builder.phases:
+                skip_reason = f"phase '{trow.phase}' not in build phases"
+            elif (
+                trow.input_tokens < 0
+                or trow.output_tokens < 0
+                or trow.total_tokens < 0
+            ):
+                skip_reason = "negative token counts"
+            elif trow.model.strip() == "":
+                skip_reason = "empty model id"
+            else:
+                resolved = _resolve_telemetry_candidate(
+                    raw, trow.model, trow.deployment, trow.effort
+                )
+                if resolved is None:
+                    skip_reason = (
+                        f"candidate ({trow.model}, {trow.deployment}, {trow.effort}) "
+                        "not resolvable in the registry"
+                    )
+            if skip_reason is None:
+                quality = (
+                    trow.quality_score
+                    if trow.quality_score is not None
+                    else float(trow.task_success)  # quality_score None ⇒ success set
+                )
+                if not 0.0 <= quality <= 1.0:
+                    skip_reason = f"outcome {quality} outside [0, 1]"
+            if skip_reason is not None:
+                telemetry_skipped += 1
+                logger.warning(
+                    "telemetry bridge: skipping execution %s: %s",
+                    trow.execution_id,
+                    skip_reason,
+                )
+                continue
+
+            model, _provider, deployment, variant = resolved
+            actual_total = float(
+                trow.total_tokens or (trow.input_tokens + trow.output_tokens)
             )
+            price = price_by_deployment.get(deployment.id)
+            in_p = (
+                price.input_price
+                if price and price.input_price is not None
+                else policy.default_input_price
+            )
+            out_p = (
+                price.output_price
+                if price and price.output_price is not None
+                else policy.default_output_price
+            )
+            # est_* keeps the decision's pre-execution estimate where present
+            # (0 means "not estimated" on legacy rows → fall back to actuals so
+            # the v1 keys stay meaningful on telemetry rows too).
+            est_total = trow.estimated_tokens if trow.estimated_tokens > 0 else actual_total
+            est_cost = (
+                trow.estimated_cost
+                if trow.estimated_cost > 0
+                else estimate_cost(policy, in_p, out_p, est_total)
+            )
+            actual_cost = estimate_cost(policy, in_p, out_p, actual_total)
+
+            task_type = trow.task_type or "telemetry"
+            task_id = "task-tel-" + hashlib.sha256(
+                f"{trow.phase}|{task_type}|{trow.event_date.isoformat()}".encode()
+            ).hexdigest()[:16]
+            repo = (
+                trow.repo_features
+                if isinstance(trow.repo_features, dict)
+                else dict(builder.repo_features)
+            )
+            task_text = render_task_text(trow.phase, task_type, trow.input_tokens, repo)
+            group_key = (trow.phase, task_id)
+            telemetry_group_tokens[group_key] = max(
+                telemetry_group_tokens.get(group_key, 0.0), actual_total
+            )
+
+            example = DatasetExample(
+                example_id="ex-tel-" + hashlib.sha256(
+                    f"{task_id}|{model.canonical_id}#{deployment.deployment_ref}"
+                    f"#{variant.effort}|{trow.execution_id}".encode()
+                ).hexdigest()[:16],
+                task_id=task_id,
+                phase=trow.phase,
+                task_type=task_type,
+                context_tokens=trow.input_tokens,
+                task_text=task_text,
+                candidate=CandidateRef(
+                    model=model.canonical_id,
+                    deployment=deployment.deployment_ref,
+                    effort=variant.effort,
+                ),
+                model_features=_model_feature_vector(
+                    model,
+                    price,
+                    (in_p, out_p),
+                    tps_proxy=(
+                        speed_rows[model.id] / speed_top
+                        if speed_rows and speed_top and model.id in speed_rows
+                        else 0.0
+                    ),
+                ),
+                benchmark_features=[scores.get((model.id, k), 0.0) for k in bench_names],
+                benchmark_feature_names=bench_names,
+                cost_features={
+                    "est_input_tokens": est_total * (1 - policy.output_fraction),
+                    "est_output_tokens": est_total * policy.output_fraction,
+                    "est_total_tokens": est_total,
+                    "est_cost": est_cost,
+                    "actual_input_tokens": float(trow.input_tokens),
+                    "actual_output_tokens": float(trow.output_tokens),
+                    "actual_total_tokens": actual_total,
+                    "actual_cost": actual_cost,
+                    "latency_ms": (
+                        float(trow.latency_ms) if trow.latency_ms is not None else None
+                    ),
+                },
+                label_utility=0.0,  # filled after telemetry group maxima are known
+                label_quality_estimate=quality,
+                label_provenance=PROVENANCE_TELEMETRY,
+                snapshot_date=trow.event_date.isoformat(),
+                split=_temporal_split(
+                    trow.event_date,
+                    first_seen[model.id],
+                    builder.train_end,
+                    builder.val_end,
+                ),
+            )
+            staged_tel.append((example, model.id))
+
+    for example, mid in staged:
+        example.label_utility = _utility_label(
+            example.label_quality_estimate,
+            example.cost_features["est_total_tokens"],
+            group_tokens[(example.phase, example.task_id)],
+            cost_weight=builder.cost_weight,
+            threshold=config.phase_config(example.phase).threshold_quality,
+            threshold_penalty=builder.threshold_penalty,
+            hard_threshold=builder.hard_threshold,
+        )
         example.example_id = "ex-" + hashlib.sha256(
             f"{example.task_id}|{example.candidate.key}".encode()
         ).hexdigest()[:16]
         # --- temporal split ------------------------------------------------ #
-        if first_seen[mid] > builder.train_end:
-            example.split = "temporal_test"
-        elif date.fromisoformat(example.snapshot_date) < builder.train_end:
-            example.split = "train"
-        elif (
-            builder.val_end is not None
-            and date.fromisoformat(example.snapshot_date) < builder.val_end
-        ):
-            example.split = "validation"
-        else:
-            example.split = "test"
-    dataset.examples = [example for example, _ in staged]
+        example.split = _temporal_split(
+            date.fromisoformat(example.snapshot_date),
+            first_seen[mid],
+            builder.train_end,
+            builder.val_end,
+        )
+
+    # Telemetry utilities use ACTUAL total tokens against the telemetry group
+    # maxima (same formula as bootstrap, so provenances stay comparable).
+    for example, _mid in staged_tel:
+        example.label_utility = _utility_label(
+            example.label_quality_estimate,
+            example.cost_features["actual_total_tokens"],
+            telemetry_group_tokens[(example.phase, example.task_id)],
+            cost_weight=builder.cost_weight,
+            threshold=config.phase_config(example.phase).threshold_quality,
+            threshold_penalty=builder.threshold_penalty,
+            hard_threshold=builder.hard_threshold,
+        )
+
+    dataset.examples = [example for example, _ in staged] + [
+        example for example, _ in staged_tel
+    ]
+    if telemetry_db is not None:
+        # Uniform schema-v2 cost keys across EVERY row: pyarrow infers the
+        # struct type from the data, so rows without measurements must carry
+        # explicit None instead of omitting the key.
+        for example in dataset.examples:
+            for key in (
+                "actual_input_tokens",
+                "actual_output_tokens",
+                "actual_total_tokens",
+                "actual_cost",
+                "latency_ms",
+            ):
+                example.cost_features.setdefault(key, None)
+        dataset.telemetry_stats = {
+            "read": len(telemetry_rows),
+            "emitted": len(staged_tel),
+            "skipped": telemetry_skipped,
+        }
+        if staged_tel:
+            dataset.label_provenance_statement = (
+                PROVENANCE_STATEMENT + "\n\n" + TELEMETRY_PROVENANCE_ADDENDUM
+            )
     dataset.benchmark_feature_names = bench_names
     dataset.model_feature_names = MODEL_FEATURE_NAMES
 
@@ -891,6 +1171,8 @@ def build_examples(
         return "test"
 
     for task_id in sorted(by_group):
+        if task_id.startswith("task-tel-"):
+            continue  # telemetry rows are pointwise labels; pairs stay prior-derived
         group = sorted(by_group[task_id], key=lambda e: e.candidate.key)
         phase = group[0].phase
         pair_count = 0
@@ -1045,7 +1327,9 @@ def load_dataset(path: str | Path) -> DatasetV1:
                 model_features=list(row["model_features"]),
                 benchmark_features=list(row["benchmark_features"]),
                 benchmark_feature_names=tuple(row["benchmark_feature_names"]),
-                cost_features={k: float(v) for k, v in row["cost_features"].items()},
+                cost_features={
+                    k: float(v) for k, v in row["cost_features"].items() if v is not None
+                },
                 label_utility=float(row["label_utility"]),
                 label_quality_estimate=float(row["label_quality_estimate"]),
                 label_provenance=row["label_provenance"],

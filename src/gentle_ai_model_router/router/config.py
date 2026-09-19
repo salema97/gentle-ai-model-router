@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
 
 DEFAULT_CONFIG_FILENAMES = ("router.yaml", "router.yaml.example")
 ENV_CONFIG_VAR = "ROUTER_CONFIG"
+
+# Shared by training and evaluation: "auto" = cuda when available, else cpu.
+DeviceSetting = Literal["auto", "cpu", "cuda"]
 
 
 class ArtificialAnalysisConfig(BaseModel):
@@ -53,12 +56,30 @@ class LocalDiscoveryConfig(BaseModel):
     claude_agents_dir: str = "~/.claude/agents"
 
 
+class GentleTelemetryConfig(BaseModel):
+    """Gentle AI Telemetry dataset settings."""
+
+    enabled: bool = True
+    base_url: str = "https://gentlemanprogramming.com/data/datasets"
+    endpoints: list[str] = Field(
+        default_factory=lambda: [
+            "runtime-agent-models.csv",
+            "runtime-by-model.csv",
+            "runtime-by-effort.csv",
+        ]
+    )
+    timeout_seconds: float = 30.0
+
+
 class DataSourcesConfig(BaseModel):
     artificial_analysis: ArtificialAnalysisConfig = Field(
         default_factory=ArtificialAnalysisConfig
     )
     lmarena: LMArenaConfig = Field(default_factory=LMArenaConfig)
     local_discovery: LocalDiscoveryConfig = Field(default_factory=LocalDiscoveryConfig)
+    gentle_telemetry: GentleTelemetryConfig = Field(
+        default_factory=GentleTelemetryConfig
+    )
 
 
 class RegistryConfig(BaseModel):
@@ -186,7 +207,7 @@ class TrainingConfig(BaseModel):
     training/ — the base install never needs them.
     """
 
-    model_name: str = "microsoft/deberta-v3-base"
+    model_name: str = "answerdotai/ModernBERT-base"
     objective: str = "pointwise"  # pointwise | pairwise (listwise: future work)
     output_dir: str = "models/deberta-router"
     learning_rate: float = 2e-5
@@ -194,6 +215,20 @@ class TrainingConfig(BaseModel):
     batch_size: int = 8
     max_length: int = 512
     seed: int = 42
+    device: DeviceSetting = "auto"  # auto = cuda when available, else cpu
+
+
+class EvaluationConfig(BaseModel):
+    """Ranker scoring settings for `router evaluate` (docs/evaluation.md).
+
+    ``batch_size`` controls how many candidates of a task group are scored
+    per forward pass; ``device`` mirrors the training setting. Both only
+    apply when a checkpoint is being evaluated — baselines-only runs never
+    import torch.
+    """
+
+    batch_size: int = 64
+    device: DeviceSetting = "auto"
 
 
 class RouterConfig(BaseModel):
@@ -208,6 +243,7 @@ class RouterConfig(BaseModel):
     integrate: IntegrateConfig = Field(default_factory=IntegrateConfig)
     shim: ShimConfig = Field(default_factory=ShimConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     token_weights: dict[str, float] = Field(default_factory=dict)
     api: ApiConfig = Field(default_factory=ApiConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

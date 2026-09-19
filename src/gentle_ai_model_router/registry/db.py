@@ -8,7 +8,7 @@ the snapshot id it came from — provenance is mandatory.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,9 +31,11 @@ from gentle_ai_model_router.registry.normalize import (
     Effort,
     NormalizedAAModel,
     NormalizedArenaRecord,
+    NormalizedTelemetryRecord,
     internal_effort,
     normalize_aa_models,
     normalize_arena_records,
+    normalize_telemetry_records,
 )
 
 logger = get_logger(__name__)
@@ -448,6 +450,74 @@ def apply_arena_snapshot(session: Session, snapshot_doc: dict[str, Any]) -> dict
         raw_path="",
     )
     logger.info("apply_snapshot source=lmarena snapshot_id=%s counts=%s", snapshot_id, counts)
+    return counts
+
+
+def apply_telemetry_snapshot(session: Session, snapshot_doc: dict[str, Any]) -> dict[str, int]:
+    """Apply one Gentle Telemetry snapshot document to the registry."""
+    snapshot_id = str(snapshot_doc.get("snapshot_id") or "unknown")
+    records: list[NormalizedTelemetryRecord] = normalize_telemetry_records(snapshot_doc)
+    counts = {"models": 0, "benchmarks": 0}
+    for rec in records:
+        tool_calling = (
+            True
+            if rec.agent_class in {"sdd-apply", "sdd-verify", "apply", "verify", "worker"}
+            else None
+        )
+        model = upsert_model(
+            session,
+            canonical_id=rec.canonical_id,
+            org=rec.org,
+            name=rec.name,
+            tool_calling=tool_calling,
+        )
+        provider = get_or_create_provider(session, rec.org or "unknown")
+        deployment = get_or_create_deployment(session, model, provider, "default")
+        for eff in ("off", "low", "medium", "high"):
+            upsert_variant(session, deployment, eff, eff)
+        counts["models"] += 1
+        upsert_benchmark(
+            session,
+            model,
+            benchmark="telemetry_success_rate",
+            score=rec.success_rate,
+            category=rec.agent_class,
+            source_snapshot_id=snapshot_id,
+        )
+        counts["benchmarks"] += 1
+        if rec.tokens_per_success > 0:
+            upsert_benchmark(
+                session,
+                model,
+                benchmark="telemetry_tokens_per_success",
+                score=rec.tokens_per_success,
+                category=rec.agent_class,
+                source_snapshot_id=snapshot_id,
+            )
+            counts["benchmarks"] += 1
+
+    raw_fetched = snapshot_doc.get("fetched_at")
+    if isinstance(raw_fetched, datetime):
+        fetched_at = raw_fetched
+    elif raw_fetched:
+        fetched_at = datetime.fromisoformat(str(raw_fetched))
+    else:
+        fetched_at = datetime.now(tz=UTC)
+
+    meta = snapshot_doc.get("meta") or {}
+    record_snapshot(
+        session,
+        source="gentle-telemetry",
+        snapshot_id=snapshot_id,
+        fetched_at=_to_utc(fetched_at),
+        record_count=int(meta.get("record_count") or len(records)),
+        raw_path="",
+    )
+    logger.info(
+        "apply_snapshot source=gentle-telemetry snapshot_id=%s counts=%s",
+        snapshot_id,
+        counts,
+    )
     return counts
 
 

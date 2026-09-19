@@ -280,3 +280,172 @@ def test_apply_local_candidates(tmp_path):
         session.commit()
         assert counts2["variants"] == 3
         assert session.query(ModelVariant).count() == 6
+
+
+def test_apply_telemetry_snapshot(tmp_path):
+    """Test telemetry snapshot normalization and insertion into the database."""
+    engine = _engine(tmp_path)
+    snapshot_doc = {
+        "snapshot_id": "2026-09-19-gentle-telemetry",
+        "source": "gentle-telemetry",
+        "fetched_at": "2026-09-19T05:57:08.678841+00:00",
+        "data": {
+            "agent_models": [
+                {
+                    "agent_class": "explore",
+                    "model": "openai/gpt-5.6-luna",
+                    "rows": 100,
+                    "responses": 200,
+                    "tokens_processed": 50000,
+                    "errored_rows": 10,
+                    "success_rate": 0.9,
+                    "tokens_per_response": 250.0,
+                    "tokens_per_success": 555.5,
+                },
+                {
+                    "agent_class": "verify",
+                    "model": "nan/deepseek-v4-flash",
+                    "rows": 50,
+                    "responses": 50,
+                    "tokens_processed": 20000,
+                    "errored_rows": 0,
+                    "success_rate": 1.0,
+                    "tokens_per_response": 400.0,
+                    "tokens_per_success": 400.0,
+                },
+                {
+                    "agent_class": "architect",
+                    "model": "custom/custom",
+                    "rows": 10,
+                    "responses": 10,
+                    "tokens_processed": 1000,
+                    "errored_rows": 10,
+                    "success_rate": 0.0,
+                    "tokens_per_response": 100.0,
+                    "tokens_per_success": 0.0,
+                },
+            ]
+        },
+        "meta": {"record_count": 3},
+    }
+    with Session(engine) as session:
+        counts = registry_db.apply_telemetry_snapshot(session, snapshot_doc)
+        session.commit()
+
+    assert counts["models"] == 3
+    # 3 success_rate benchmarks + 2 tokens_per_success (architect has tokens_per_success == 0.0)
+    assert counts["benchmarks"] == 5
+
+    with Session(engine) as session:
+        # 1. Standard model with org/name
+        m1 = session.query(Model).filter_by(canonical_id="openai/gpt-5.6-luna").one()
+        assert m1.org == "openai"
+        assert m1.name == "gpt-5.6-luna"
+
+        b_sr1 = (
+            session.query(ModelBenchmark)
+            .filter_by(
+                model_id=m1.id,
+                benchmark="telemetry_success_rate",
+                category="explore",
+            )
+            .one()
+        )
+        assert b_sr1.score == 0.9
+        assert b_sr1.source_snapshot_id == "2026-09-19-gentle-telemetry"
+
+        b_tps1 = (
+            session.query(ModelBenchmark)
+            .filter_by(
+                model_id=m1.id,
+                benchmark="telemetry_tokens_per_success",
+                category="explore",
+            )
+            .one()
+        )
+        assert b_tps1.score == 555.5
+        assert b_tps1.source_snapshot_id == "2026-09-19-gentle-telemetry"
+
+        # 2. Model with placeholder org "nan" -> normalized to "unknown"
+        m2 = session.query(Model).filter_by(canonical_id="unknown/deepseek-v4-flash").one()
+        assert m2.org == "unknown"
+        assert m2.name == "deepseek-v4-flash"
+
+        b_sr2 = (
+            session.query(ModelBenchmark)
+            .filter_by(
+                model_id=m2.id,
+                benchmark="telemetry_success_rate",
+                category="verify",
+            )
+            .one()
+        )
+        assert b_sr2.score == 1.0
+
+        # 3. Model with custom/custom placeholder
+        m3 = session.query(Model).filter_by(canonical_id="custom/custom").one()
+        assert m3.org == "custom"
+        assert m3.name == "custom"
+
+        # 4. Snapshot record
+        snap = (
+            session.query(ModelSnapshot)
+            .filter_by(snapshot_id="2026-09-19-gentle-telemetry")
+            .one()
+        )
+        assert snap.source == "gentle-telemetry"
+        assert snap.record_count == 3
+
+    # Idempotent: second run does not duplicate rows
+    with Session(engine) as session:
+        counts2 = registry_db.apply_telemetry_snapshot(session, snapshot_doc)
+        session.commit()
+    assert counts2["models"] == 3
+    assert counts2["benchmarks"] == 5
+    stats = registry_db.registry_stats(engine)
+    assert stats["models"] == 3
+    assert stats["model_benchmarks"] == 5
+    assert stats["model_snapshots"] == 1
+
+
+def test_normalize_telemetry_records():
+    """Test various payload shapes and metric derivations."""
+    from gentle_ai_model_router.registry.normalize import normalize_telemetry_records
+
+    # Derivations when metrics are missing
+    records = normalize_telemetry_records(
+        [
+            {
+                "agent_class": "test",
+                "model": "deepseek-v4",  # no slash -> unknown/deepseek-v4
+                "rows": 100,
+                "responses": 50,
+                "tokens_processed": 10000,
+                "errored_rows": 20,
+            },
+            {
+                "agent_class": "test2",
+                "model": "unknown",  # placeholder -> unknown/unknown
+                "rows": 0,
+                "responses": 0,
+                "tokens_processed": 0,
+                "errored_rows": 0,
+            },
+        ]
+    )
+    assert len(records) == 2
+    r0 = records[0]
+    assert r0.canonical_id == "unknown/deepseek-v4"
+    assert r0.org == "unknown"
+    assert r0.name == "deepseek-v4"
+    assert r0.success_rate == 0.8
+    assert r0.tokens_per_response == 200.0
+    assert r0.tokens_per_success == 125.0  # 10000 / 80
+
+    r1 = records[1]
+    assert r1.canonical_id == "unknown/unknown"
+    assert r1.org == "unknown"
+    assert r1.name == "unknown"
+    assert r1.success_rate == 0.0
+    assert r1.tokens_per_response == 0.0
+    assert r1.tokens_per_success == 0.0

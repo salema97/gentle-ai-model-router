@@ -125,6 +125,24 @@ class NormalizedArenaRecord:
     leaderboard_publish_date: str | None = None
 
 
+@dataclass
+class NormalizedTelemetryRecord:
+    """One Gentle AI telemetry agent-model record, normalized to registry shape."""
+
+    canonical_id: str
+    org: str
+    name: str
+    agent_class: str
+    rows: int
+    responses: int
+    tokens_processed: int
+    errored_rows: int
+    success_rate: float
+    tokens_per_response: float
+    tokens_per_success: float
+    error_categories: str = ""
+
+
 def _first(mapping: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = mapping.get(key)
@@ -408,6 +426,108 @@ def normalize_arena_records(
                     if row.get("leaderboard_publish_date") is not None
                     else None
                 ),
+            )
+        )
+    return out
+
+
+_PLACEHOLDERS = {"nan", "none", "null", ""}
+
+
+def _parse_telemetry_model(raw_model: str) -> tuple[str, str, str]:
+    """Resolve (canonical_id, org, name) from a raw telemetry model string."""
+    raw = raw_model.strip()
+    if "/" in raw:
+        org, _, name = raw.partition("/")
+        org = org.strip()
+        name = name.strip()
+    else:
+        org = ""
+        name = raw
+
+    lowered_org = org.lower()
+    lowered_name = name.lower()
+
+    if lowered_org in _PLACEHOLDERS:
+        org = "unknown"
+    if lowered_name in _PLACEHOLDERS:
+        name = "unknown"
+
+    if lowered_name == "custom" and org == "unknown":
+        org = "custom"
+
+    canonical_id = f"{org}/{name}"
+    return canonical_id, org, name
+
+
+def normalize_telemetry_records(payload: Any) -> list[NormalizedTelemetryRecord]:
+    """Normalize Gentle AI telemetry records into registry-shaped records."""
+    if isinstance(payload, list):
+        raw_records = [r for r in payload if isinstance(r, dict)]
+    elif isinstance(payload, dict):
+        if isinstance(payload.get("agent_models"), list):
+            raw_records = [r for r in payload["agent_models"] if isinstance(r, dict)]
+        elif isinstance(payload.get("data"), dict) and isinstance(
+            payload["data"].get("agent_models"), list
+        ):
+            raw_records = [r for r in payload["data"]["agent_models"] if isinstance(r, dict)]
+        elif isinstance(payload.get("data"), list):
+            raw_records = [r for r in payload["data"] if isinstance(r, dict)]
+        else:
+            raw_records = []
+    else:
+        raw_records = []
+
+    out: list[NormalizedTelemetryRecord] = []
+    for record in raw_records:
+        raw_model = _first(record, "model", "model_name", "name")
+        if raw_model is None:
+            continue
+        raw_model_str = str(raw_model).strip()
+        if not raw_model_str:
+            continue
+
+        canonical_id, org, name = _parse_telemetry_model(raw_model_str)
+
+        rows = _as_int(record.get("rows")) or 0
+        responses = _as_int(record.get("responses")) or 0
+        tokens_processed = _as_int(record.get("tokens_processed")) or 0
+        errored_rows = _as_int(record.get("errored_rows")) or 0
+
+        success_rate = _as_float(record.get("success_rate"))
+        if success_rate is None:
+            success_rate = (rows - errored_rows) / rows if rows > 0 else 0.0
+
+        tokens_per_response = _as_float(record.get("tokens_per_response"))
+        if tokens_per_response is None:
+            tokens_per_response = (
+                tokens_processed / responses if responses > 0 else 0.0
+            )
+
+        tokens_per_success = _as_float(record.get("tokens_per_success"))
+        if tokens_per_success is None:
+            successful = rows - errored_rows
+            tokens_per_success = (
+                tokens_processed / successful if successful > 0 else 0.0
+            )
+
+        agent_class = str(record.get("agent_class") or "")
+        error_categories = str(record.get("error_categories") or "")
+
+        out.append(
+            NormalizedTelemetryRecord(
+                canonical_id=canonical_id,
+                org=org,
+                name=name,
+                agent_class=agent_class,
+                rows=rows,
+                responses=responses,
+                tokens_processed=tokens_processed,
+                errored_rows=errored_rows,
+                success_rate=success_rate,
+                tokens_per_response=tokens_per_response,
+                tokens_per_success=tokens_per_success,
+                error_categories=error_categories,
             )
         )
     return out

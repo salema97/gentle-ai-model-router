@@ -21,6 +21,14 @@ data_sources:
     pi_models: "~/.pi/gentle-ai/models.json"
     codex_profiles_dir: "~/.codex"
     claude_agents_dir: "~/.claude/agents"
+  gentle_telemetry:
+    enabled: true
+    base_url: "https://gentlemanprogramming.com/data/datasets"
+    endpoints:
+      - "runtime-agent-models.csv"
+      - "runtime-by-model.csv"
+      - "runtime-by-effort.csv"
+    timeout_seconds: 30.0
 
 registry:
   database_url: "postgresql+psycopg://router:router@localhost:5432/model_router"
@@ -65,16 +73,16 @@ escalation:
 # ":category" suffix, e.g. lmarena_elo:text) min-max normalized across the
 # candidate set.
 phases:
-  init:      { threshold_quality: 0.60 }
-  explore:   { threshold_quality: 0.60, weights: { "lmarena_elo:text": 1.0, "artificial_analysis_intelligence_index": 0.3 } }
-  research:  { threshold_quality: 0.65 }
-  propose:   { threshold_quality: 0.75 }
-  spec:      { threshold_quality: 0.80 }
-  design:    { threshold_quality: 0.85, weights: { "artificial_analysis_intelligence_index": 1.0, "lmarena_elo:webdev": 0.5 } }
-  tasks:     { threshold_quality: 0.70 }
-  apply:     { threshold_quality: 0.75, weights: { "artificial_analysis_intelligence_index": 1.0 } }
-  verify:    { threshold_quality: 0.80, weights: { "artificial_analysis_intelligence_index": 1.0 } }
-  archive:   { threshold_quality: 0.60 }
+  init:      { threshold_quality: 0.60, weights: { "telemetry_success_rate:sdd-init": 1.0 } }
+  explore:   { threshold_quality: 0.60, weights: { "telemetry_success_rate:explore": 1.0, "telemetry_success_rate:sdd-explore": 1.0, "lmarena_elo:text": 0.5, "artificial_analysis_intelligence_index": 0.3 } }
+  research:  { threshold_quality: 0.65, weights: { "telemetry_success_rate:sdd-research": 1.0 } }
+  propose:   { threshold_quality: 0.75, weights: { "telemetry_success_rate:sdd-propose": 1.0 } }
+  spec:      { threshold_quality: 0.80, weights: { "telemetry_success_rate:sdd-spec": 1.0 } }
+  design:    { threshold_quality: 0.85, weights: { "telemetry_success_rate:sdd-design": 1.0, "artificial_analysis_intelligence_index": 0.8, "lmarena_elo:webdev": 0.5 } }
+  tasks:     { threshold_quality: 0.70, weights: { "telemetry_success_rate:sdd-tasks": 1.0 } }
+  apply:     { threshold_quality: 0.75, weights: { "telemetry_success_rate:sdd-apply": 1.0, "artificial_analysis_intelligence_index": 0.5 } }
+  verify:    { threshold_quality: 0.80, weights: { "telemetry_success_rate:sdd-verify": 1.0, "telemetry_success_rate:verify": 1.0, "artificial_analysis_intelligence_index": 0.5 } }
+  archive:   { threshold_quality: 0.60, weights: { "telemetry_success_rate:sdd-archive": 1.0 } }
   onboard:   { threshold_quality: 0.60 }
 
 policy:
@@ -131,6 +139,11 @@ training:
   batch_size: 8
   max_length: 512
   seed: 42
+  device: "auto"                            # auto = cuda when available, else cpu
+
+evaluation:
+  batch_size: 64                            # candidates scored per forward pass
+  device: "auto"                            # ranker scoring device (baselines-only ignores both)
 
 # FastAPI server (api/server.py), consumed by `router serve`.
 api:

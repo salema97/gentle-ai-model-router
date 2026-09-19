@@ -83,7 +83,8 @@ class SnapshotStore:
         fetched_at = (fetched_at or datetime.now(tz=UTC)).astimezone(UTC)
         meta = dict(meta or {})
         errors = [str(e) for e in meta.get("errors", [])]
-        record_count = int(meta.get("record_count") or _count_records(data))
+        raw_count = meta.get("record_count")
+        record_count = int(raw_count if raw_count is not None else _count_records(data))
 
         slug = self._safe_slug(source)
         date_dir = self._date_dir(fetched_at)

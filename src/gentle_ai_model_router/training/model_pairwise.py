@@ -67,16 +67,80 @@ def pairwise_loss(diff: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.binary_cross_entropy_with_logits(diff, target)
 
 
+def precompute_pairwise_cache(
+    candidates_by_key: dict[str, Any],
+    tokenizer: Any,
+    model_feature_names: tuple[str, ...],
+    max_length: int = 512,
+) -> dict[str, dict[str, Any]]:
+    """Pre-encode all unique candidates once in <1s instead of on every batch."""
+    _require_train_extra()
+    import torch
+
+    from gentle_ai_model_router.dataset.builder import render_features_text
+    from gentle_ai_model_router.training.model import encode_pair_text
+
+    cache: dict[str, dict[str, Any]] = {}
+    for key, example in candidates_by_key.items():
+        text = encode_pair_text(
+            example.task_text,
+            example.candidate.model,
+            example.candidate.deployment,
+            example.candidate.effort,
+            render_features_text(
+                list(model_feature_names) + list(example.benchmark_feature_names),
+                list(example.model_features) + list(example.benchmark_features),
+            ),
+        )
+        enc = tokenizer(
+            text,
+            max_length=max_length,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        numeric = torch.tensor(
+            list(example.model_features) + list(example.benchmark_features),
+            dtype=torch.float32,
+        )
+        cache[key] = {
+            "input_ids": enc["input_ids"][0],
+            "attention_mask": enc["attention_mask"][0],
+            "numeric": numeric,
+        }
+    return cache
+
+
 def collate_pairs(
     pairs: list[Any],
     examples_by_key: dict[str, Any],
     tokenizer: Any,
     model_feature_names: tuple[str, ...],
     max_length: int = 512,
+    cached_encodings: dict[str, Any] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Tokenize preference pairs into a model batch."""
     _require_train_extra()
     import torch
+
+    if cached_encodings is not None:
+        sides: dict[str, dict[str, torch.Tensor]] = {}
+        for side, attr in (("a", "candidate_a"), ("b", "candidate_b")):
+            refs = [getattr(p, attr).key for p in pairs]
+            batch_inputs = [cached_encodings[r] for r in refs]
+            sides[side] = {
+                "input_ids": torch.stack([b["input_ids"] for b in batch_inputs]),
+                "attention_mask": torch.stack([b["attention_mask"] for b in batch_inputs]),
+                "numeric": torch.stack([b["numeric"] for b in batch_inputs]),
+            }
+        return {
+            "input_ids_a": sides["a"]["input_ids"],
+            "attention_mask_a": sides["a"]["attention_mask"],
+            "numeric_a": sides["a"]["numeric"],
+            "input_ids_b": sides["b"]["input_ids"],
+            "attention_mask_b": sides["b"]["attention_mask"],
+            "numeric_b": sides["b"]["numeric"],
+        }
 
     from gentle_ai_model_router.dataset.builder import render_features_text
     from gentle_ai_model_router.training.model import encode_pair_text
@@ -96,10 +160,10 @@ def collate_pairs(
     def _numeric(example: Any) -> list[float]:
         return list(example.model_features) + list(example.benchmark_features)
 
-    sides: dict[str, dict[str, torch.Tensor]] = {}
+    sides_fallback: dict[str, dict[str, torch.Tensor]] = {}
     for side, attr in (("a", "candidate_a"), ("b", "candidate_b")):
-        refs = [getattr(p, attr) for p in pairs]
-        examples = [examples_by_key[r.key] for r in refs]
+        refs_fallback = [getattr(p, attr) for p in pairs]
+        examples = [examples_by_key[r.key] for r in refs_fallback]
         enc = tokenizer(
             [_text(e) for e in examples],
             padding=True,
@@ -107,16 +171,16 @@ def collate_pairs(
             max_length=max_length,
             return_tensors="pt",
         )
-        sides[side] = {
+        sides_fallback[side] = {
             "input_ids": enc["input_ids"],
             "attention_mask": enc["attention_mask"],
             "numeric": torch.tensor([_numeric(e) for e in examples], dtype=torch.float32),
         }
     return {
-        "input_ids_a": sides["a"]["input_ids"],
-        "attention_mask_a": sides["a"]["attention_mask"],
-        "numeric_a": sides["a"]["numeric"],
-        "input_ids_b": sides["b"]["input_ids"],
-        "attention_mask_b": sides["b"]["attention_mask"],
-        "numeric_b": sides["b"]["numeric"],
+        "input_ids_a": sides_fallback["a"]["input_ids"],
+        "attention_mask_a": sides_fallback["a"]["attention_mask"],
+        "numeric_a": sides_fallback["a"]["numeric"],
+        "input_ids_b": sides_fallback["b"]["input_ids"],
+        "attention_mask_b": sides_fallback["b"]["attention_mask"],
+        "numeric_b": sides_fallback["b"]["numeric"],
     }

@@ -1972,6 +1972,15 @@ def train(
             "examples (default: 1.0 = uniform, byte-identical to unweighted)."
         ),
     ),
+    bf16: bool | None = typer.Option(
+        None, "--bf16/--no-bf16", help="Enable bfloat16 mixed precision."
+    ),
+    max_vram_fraction: float | None = typer.Option(
+        None, "--max-vram-fraction", help="Cap CUDA memory allocation fraction (e.g. 0.5)."
+    ),
+    progress: bool | None = typer.Option(
+        None, "--progress/--no-progress", help="Show live progress bar."
+    ),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
 ) -> None:
@@ -1989,6 +1998,9 @@ def train(
         ("seed", seed),
         ("device", device),
         ("telemetry_weight", telemetry_weight),
+        ("bf16", bf16),
+        ("max_vram_fraction", max_vram_fraction),
+        ("disable_tqdm", not progress if progress is not None else None),
     ):
         if value is not None:
             overrides[key] = value

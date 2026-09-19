@@ -157,6 +157,9 @@ def train(
     # model exists below. Trainer respects an already-placed model.
     device = resolve_device(training.device, torch.cuda.is_available())
     logger.info("training device=%s", device)
+    if device.startswith("cuda") and getattr(training, "max_vram_fraction", None) is not None:
+        torch.cuda.set_per_process_memory_fraction(training.max_vram_fraction, 0)
+        logger.info("capped CUDA memory fraction at %.2f", training.max_vram_fraction)
 
     numeric_dim = len(dataset.model_feature_names) + len(dataset.benchmark_feature_names)
     tokenizer = AutoTokenizer.from_pretrained(training.model_name)
@@ -197,7 +200,20 @@ def train(
             return (loss, outputs) if return_outputs else loss
 
     elif training.objective == "pairwise":
-        examples_by_key = {e.candidate.key: e for e in dataset.examples}
+        from gentle_ai_model_router.training.model_pairwise import precompute_pairwise_cache
+
+        pair_keys = {p.candidate_a.key for p in dataset.pairs} | {
+            p.candidate_b.key for p in dataset.pairs
+        }
+        examples_by_key = {}
+        for e in dataset.examples:
+            if e.candidate.key in pair_keys and e.candidate.key not in examples_by_key:
+                examples_by_key[e.candidate.key] = e
+                if len(examples_by_key) == len(pair_keys):
+                    break
+        cached_encodings = precompute_pairwise_cache(
+            examples_by_key, tokenizer, dataset.model_feature_names, training.max_length
+        )
         train_rows = [
             p for p in dataset.pairs if p.split == "train"
         ]
@@ -205,7 +221,12 @@ def train(
 
         def collate(rows: list[Any]) -> dict[str, Any]:
             return collate_pairs(
-                rows, examples_by_key, tokenizer, dataset.model_feature_names, training.max_length
+                rows,
+                examples_by_key,
+                tokenizer,
+                dataset.model_feature_names,
+                training.max_length,
+                cached_encodings=cached_encodings,
             )
 
         def compute_loss(
@@ -248,7 +269,10 @@ def train(
         logging_steps=10,
         save_strategy="no",  # we save manually with full provenance below
         report_to=[],
-        disable_tqdm=True,
+        disable_tqdm=training.disable_tqdm,
+        bf16=training.bf16 and device.startswith("cuda"),
+        dataloader_num_workers=0,
+        dataloader_pin_memory=False,
     )
 
     # transformers 5.x changed the custom-loss contract: ``compute_loss_func``

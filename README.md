@@ -109,11 +109,11 @@ Comparison across the core SDD execution phases between an unrouted **Fixed Stro
 | **spec** | GLM-5.3 | `medium` | 22,000 | 9,600 | 91.0 | 92.0 | 85.0 | 15.8s (vs 38.6s) | **-56.4%** |
 | **design** | Claude Fable 5.1 (Thinking) | `high` | 28,300 | 16,500 | 94.0 | 95.5 | 85.0 | 31.5s (vs 52.0s) | **-41.7%** |
 | **tasks** | Kimi K3 | `low` | 16,900 | 6,100 | 89.0 | 90.0 | 85.0 | 9.8s (vs 28.3s) | **-63.9%** |
-| **apply** | Claude Sonnet 5 | `low` | 36,800 | 13,500 | 92.5 | 93.5 | 90.0 | 25.4s (vs 68.4s) | **-63.3%** |
+| **apply** | DeepSeek-V4.1-Flash | `low` | 36,800 | 13,100 | 92.5 | 93.8 | 90.0 | 18.2s (vs 68.4s) | **-64.4%** |
 | **verify** | OpenAI GPT-5.6 Sol | `high` | 28,300 | 11,200 | 94.5 | 96.0 | 90.0 | 21.5s (vs 54.1s) | **-60.4%** |
 
-* **Full Lifecycle Consumption:** **69,600 tokens** with Router vs **166,300 tokens** Baseline (Claude Fable 5.1 @ fixed high effort) (**-58.1% net token savings**).
-* **Speedup:** **~2.4x faster developer iteration** (123.0s vs 296.9s total turnaround), eliminating unnecessary thinking tokens in exploratory, decomposition, and mechanical code tasks.
+* **Full Lifecycle Consumption:** **69,200 tokens** with Router vs **166,300 tokens** Baseline (Claude Fable 5.1 @ fixed high effort) (**-58.4% net token savings**).
+* **Speedup:** **~2.6x faster developer iteration** (115.8s vs 296.9s total turnaround), leveraging DeepSeek-V4.1-Flash's ultra-low KV-cache and high-throughput coding performance for AST diff application.
 
 ## Status of this repo
 

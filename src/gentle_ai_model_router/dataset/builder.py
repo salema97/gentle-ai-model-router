@@ -96,6 +96,9 @@ class DatasetBuilderConfig(BaseModel):
     # Token cost penalty weight for the bootstrap utility label:
     # penalty = cost_weight * est_tokens / max_est_tokens(group).
     cost_weight: float = 0.5
+    # Quality threshold conditioning:
+    threshold_penalty: float = 0.0
+    hard_threshold: bool = False
     # Temporal split (required — forcing an explicit decision is deliberate).
     train_end: date
     val_end: date | None = None
@@ -305,6 +308,8 @@ def build_examples(
         label_provenance_statement=PROVENANCE_STATEMENT,
         git_commit=_git_commit(),
         created_at=datetime.now(UTC).isoformat(),
+        threshold_penalty=builder.threshold_penalty,
+        hard_threshold=builder.hard_threshold,
     )
 
     # --- examples ----------------------------------------------------------- #
@@ -391,9 +396,15 @@ def build_examples(
             if max_tokens
             else 0.0
         )
-        example.label_utility = max(
-            0.0, min(1.0, example.label_quality_estimate - penalty)
-        )
+        threshold = config.phase_config(example.phase).threshold_quality
+        below_threshold = example.label_quality_estimate < threshold
+        if below_threshold and builder.hard_threshold:
+            example.label_utility = 0.0
+        else:
+            fail_penalty = builder.threshold_penalty if below_threshold else 0.0
+            example.label_utility = max(
+                0.0, min(1.0, example.label_quality_estimate - penalty - fail_penalty)
+            )
         example.example_id = "ex-" + hashlib.sha256(
             f"{example.task_id}|{example.candidate.key}".encode()
         ).hexdigest()[:16]
@@ -506,7 +517,11 @@ def _pair_to_row(pair: PreferencePair) -> dict:
     return row
 
 
-def write_dataset(dataset: DatasetV1, data_dir: str | Path) -> Path:
+def write_dataset(
+    dataset: DatasetV1,
+    data_dir: str | Path,
+    builder: DatasetBuilderConfig | None = None,
+) -> Path:
     """Write examples + pairs + manifest under data_dir/datasets/<name>/v<N>/.
 
     Parquet when pyarrow is available, JSONL fallback otherwise.
@@ -541,6 +556,12 @@ def write_dataset(dataset: DatasetV1, data_dir: str | Path) -> Path:
     manifest = dataset.manifest()
     manifest["format"] = format_used
     manifest["feature_schema_version"] = FEATURE_SCHEMA_VERSION
+    if builder is not None:
+        manifest["threshold_penalty"] = builder.threshold_penalty
+        manifest["hard_threshold"] = builder.hard_threshold
+    else:
+        manifest["threshold_penalty"] = getattr(dataset, "threshold_penalty", 0.0)
+        manifest["hard_threshold"] = getattr(dataset, "hard_threshold", False)
     (out_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -624,4 +645,6 @@ def load_dataset(path: str | Path) -> DatasetV1:
         dataset.label_provenance_statement = manifest.get("label_provenance_statement", "")
         dataset.git_commit = manifest.get("git_commit", "unknown")
         dataset.created_at = manifest.get("created_at", "")
+        dataset.threshold_penalty = float(manifest.get("threshold_penalty", 0.0))
+        dataset.hard_threshold = bool(manifest.get("hard_threshold", False))
     return dataset

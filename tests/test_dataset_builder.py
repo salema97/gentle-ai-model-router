@@ -174,6 +174,72 @@ def test_utility_is_normalized_to_unit_interval(dated_session, builder_config, t
         assert 0.0 <= e.label_utility <= 1.0
 
 
+def test_threshold_penalty_penalizes_failing_candidates(
+    dated_session, builder_config, tmp_path
+) -> None:
+    config = _design_config(tmp_path)
+    threshold = config.phase_config("design").threshold_quality
+
+    dataset_default = build_examples(dated_session, config, builder_config)
+
+    penalty_value = 0.25
+    builder_penalized = builder_config.model_copy(update={"threshold_penalty": penalty_value})
+    dataset_penalized = build_examples(dated_session, config, builder_penalized)
+
+    assert dataset_penalized.examples
+    failing_count = 0
+    passing_count = 0
+
+    for def_ex, pen_ex in zip(dataset_default.examples, dataset_penalized.examples, strict=True):
+        assert def_ex.example_id == pen_ex.example_id
+        assert def_ex.label_quality_estimate == pen_ex.label_quality_estimate
+
+        if pen_ex.label_quality_estimate < threshold:
+            failing_count += 1
+            expected_utility = max(0.0, def_ex.label_utility - penalty_value)
+            assert pen_ex.label_utility == pytest.approx(expected_utility, abs=1e-9)
+            if def_ex.label_utility > 0.0:
+                assert pen_ex.label_utility < def_ex.label_utility
+        else:
+            passing_count += 1
+            assert pen_ex.label_utility == pytest.approx(def_ex.label_utility, abs=1e-9)
+
+    assert failing_count > 0, "expected candidates below threshold in test fixture"
+    assert passing_count > 0, "expected candidates meeting threshold in test fixture"
+
+
+def test_hard_threshold_zeros_failing_candidates(
+    dated_session, builder_config, tmp_path
+) -> None:
+    config = _design_config(tmp_path)
+    threshold = config.phase_config("design").threshold_quality
+
+    dataset_default = build_examples(dated_session, config, builder_config)
+
+    builder_hard = builder_config.model_copy(update={"hard_threshold": True})
+    dataset_hard = build_examples(dated_session, config, builder_hard)
+
+    assert dataset_hard.examples
+    failing_count = 0
+    passing_count = 0
+
+    for def_ex, hard_ex in zip(dataset_default.examples, dataset_hard.examples, strict=True):
+        assert def_ex.example_id == hard_ex.example_id
+        assert def_ex.label_quality_estimate == hard_ex.label_quality_estimate
+
+        if hard_ex.label_quality_estimate < threshold:
+            failing_count += 1
+            assert hard_ex.label_utility == 0.0
+            if def_ex.label_utility > 0.0:
+                assert hard_ex.label_utility < def_ex.label_utility
+        else:
+            passing_count += 1
+            assert hard_ex.label_utility == pytest.approx(def_ex.label_utility, abs=1e-9)
+
+    assert failing_count > 0, "expected candidates below threshold in test fixture"
+    assert passing_count > 0, "expected candidates meeting threshold in test fixture"
+
+
 # --------------------------------------------------------------------------- #
 # Temporal split & anti-leakage
 # --------------------------------------------------------------------------- #
@@ -315,16 +381,38 @@ def test_write_and_load_roundtrip(dated_session, builder_config, tmp_path) -> No
     assert manifest["label_provenance"] == PROVENANCE_BOOTSTRAP
     assert "NOT ground truth" in manifest["label_provenance_statement"]
     assert manifest["split_counts"]
+    assert manifest["threshold_penalty"] == 0.0
+    assert manifest["hard_threshold"] is False
 
     reloaded = load_dataset(out_dir)
     assert len(reloaded.examples) == len(dataset.examples)
     assert len(reloaded.pairs) == len(dataset.pairs)
     assert reloaded.version == dataset.version
+    assert reloaded.threshold_penalty == 0.0
+    assert reloaded.hard_threshold is False
     first = dataset.examples[0]
     again = next(e for e in reloaded.examples if e.example_id == first.example_id)
     assert again.label_utility == pytest.approx(first.label_utility)
     assert again.candidate == first.candidate
     assert again.context_tokens == first.context_tokens
+
+
+def test_write_and_load_roundtrip_with_threshold_conditioning(
+    dated_session, builder_config, tmp_path
+) -> None:
+    config = _design_config(tmp_path)
+    custom_builder = builder_config.model_copy(
+        update={"threshold_penalty": 0.2, "hard_threshold": True}
+    )
+    dataset = build_examples(dated_session, config, custom_builder)
+    out_dir = write_dataset(dataset, tmp_path / "data", builder=custom_builder)
+    manifest = json_loads_manifest(out_dir / "manifest.json")
+    assert manifest["threshold_penalty"] == 0.2
+    assert manifest["hard_threshold"] is True
+
+    reloaded = load_dataset(out_dir)
+    assert reloaded.threshold_penalty == 0.2
+    assert reloaded.hard_threshold is True
 
 
 def json_loads_manifest(path):

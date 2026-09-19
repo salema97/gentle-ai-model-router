@@ -99,6 +99,9 @@ class DatasetV1:
     created_at: str = ""
     # Anti-leakage bookkeeping (surfaced in the manifest).
     dropped_train_task_overlap: int = 0
+    # Quality threshold conditioning:
+    threshold_penalty: float = 0.0
+    hard_threshold: bool = False
 
     def split_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -130,6 +133,8 @@ class DatasetV1:
             "dropped_train_task_overlap": self.dropped_train_task_overlap,
             "git_commit": self.git_commit,
             "created_at": self.created_at,
+            "threshold_penalty": self.threshold_penalty,
+            "hard_threshold": self.hard_threshold,
         }
 
 

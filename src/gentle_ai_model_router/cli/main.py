@@ -1303,6 +1303,35 @@ def shim_ingest(
     console.print(json.dumps(counts))
 
 
+@shim_app.command("seed")
+def shim_seed(
+    dataset: str = typer.Option(..., "--dataset", help="Written dataset directory to seed from."),
+    db: str | None = typer.Option(None, "--db", help="Telemetry SQLite path override."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Seed the telemetry shim from empirical benchmark observations in a dataset.
+
+    Converts empirical-provenance examples into scored, bootstrap-stamped
+    (decision, execution) rows so the telemetry bridge has measured outcomes
+    to learn from. Idempotent: deterministic ids make re-runs no-ops. Prints
+    a machine-readable JSON summary {seeded, skipped, total}.
+    """
+    from gentle_ai_model_router.integration.empirical_seed import (
+        EmpiricalSeedError,
+        seed_empirical_dataset,
+    )
+
+    config, _ = _load_ctx(config_path, data_dir)
+    try:
+        summary = seed_empirical_dataset(dataset, db or config.telemetry_url)
+    except EmpiricalSeedError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    # Plain print: the JSON payload must survive piping unwrapped/unmangled.
+    print(json.dumps(summary))
+
+
 # --------------------------------------------------------------------------- #
 # Phase 4: bandit policy loop — outcomes, rewards, bandit inspection
 # --------------------------------------------------------------------------- #

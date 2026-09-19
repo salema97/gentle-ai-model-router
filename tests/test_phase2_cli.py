@@ -89,6 +89,50 @@ def test_cli_build_dataset_with_threshold_options(tmp_path) -> None:
     assert manifest["hard_threshold"] is True
 
 
+def test_cli_build_dataset_with_empirical_options(tmp_path) -> None:
+    from datetime import UTC
+
+    from gentle_ai_model_router.collector.snapshots import SnapshotStore
+
+    data_dir = tmp_path / "data"
+    _seed_registry(data_dir)
+    store = SnapshotStore(data_dir / "snapshots")
+    mock_payload = {
+        "source": "huggingface",
+        "dars": [
+            {
+                "prompt": "Evaluate raft consensus.",
+                "model": "test/cheap-1",
+                "quality": 0.88,
+                "cost": 0.001,
+                "input_tokens": 1000,
+                "task_name": "gsm8k",
+                "mapped_phase": "design",
+            }
+        ],
+    }
+    store.save(
+        "routing-benchmarks",
+        data=mock_payload,
+        fetched_at=datetime(2026, 1, 15, tzinfo=UTC),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "build-dataset",
+            "--name", "emp_smoke",
+            "--train-end", "2026-06-01",
+            "--phase", "design",
+            "--empirical",
+            "--max-empirical-tasks", "10",
+            "--data-dir", str(data_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    out_dir = data_dir / "datasets" / "emp_smoke" / "v1"
+    assert (out_dir / "manifest.json").exists()
+
+
 def test_cli_evaluate_baselines_only_smoke(tmp_path) -> None:
     data_dir = tmp_path / "data"
     _seed_registry(data_dir)

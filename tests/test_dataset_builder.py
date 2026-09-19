@@ -13,11 +13,12 @@ With train_end=2026-02-15 / val_end=2026-02-20:
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy.orm import Session
 
+from gentle_ai_model_router.collector.snapshots import SnapshotStore
 from gentle_ai_model_router.dataset.builder import (
     DatasetBuilderConfig,
     DatasetBuildError,
@@ -26,7 +27,11 @@ from gentle_ai_model_router.dataset.builder import (
     load_dataset,
     write_dataset,
 )
-from gentle_ai_model_router.dataset.schema import PROVENANCE_BOOTSTRAP, PROVENANCE_STATEMENT
+from gentle_ai_model_router.dataset.schema import (
+    PROVENANCE_BOOTSTRAP,
+    PROVENANCE_EMPIRICAL,
+    PROVENANCE_STATEMENT,
+)
 from gentle_ai_model_router.registry import db as registry_db
 from gentle_ai_model_router.registry.models import Model
 from gentle_ai_model_router.router.config import PhaseConfig, RouterConfig, load_config
@@ -419,3 +424,93 @@ def json_loads_manifest(path):
     import json
 
     return json.loads(path.read_text())
+
+
+def test_empirical_benchmarks_in_dataset_builder(
+    dated_session, builder_config, tmp_path
+) -> None:
+    store = SnapshotStore(tmp_path / "data" / "snapshots")
+    mock_payload = {
+        "source": "huggingface",
+        "dars": [
+            {
+                "query_id": "d1",
+                "prompt": "Optimize a distributed raft consensus cluster.",
+                "model": "test/old-model",
+                "quality": 0.95,
+                "cost": 0.001,
+                "input_tokens": 1200,
+                "task_name": "gsm8k",
+                "mapped_phase": "design",
+            },
+            {
+                "query_id": "d1",
+                "prompt": "Optimize a distributed raft consensus cluster.",
+                "model": "test/mid-model",
+                "quality": 0.35,
+                "cost": 0.002,
+                "input_tokens": 1200,
+                "task_name": "gsm8k",
+                "mapped_phase": "design",
+            },
+        ],
+        "xroutebench": [
+            {
+                "task_name": "math",
+                "query": "Solve this mixed-integer program.",
+                "model_name": "test/old-model",
+                "performance": 0.90,
+                "input_tokens": 800,
+                "mapped_phase": "design",
+            }
+        ],
+        "compendium": [
+            {
+                "dataset": "gpqa",
+                "prompt": "Evaluate physics tensor equations.",
+                "models_name": ["test/old-model", "test/mid-model"],
+                "models_performance": [0.88, 0.42],
+                "mapped_phase": "design",
+            }
+        ],
+    }
+    store.save(
+        "routing-benchmarks",
+        data=mock_payload,
+        fetched_at=datetime(2026, 1, 15, tzinfo=UTC),
+    )
+
+    builder = builder_config.model_copy(
+        update={
+            "include_empirical_benchmarks": True,
+            "empirical_snapshot_source": "routing-benchmarks",
+            "max_empirical_tasks_per_phase": 30,
+            "train_end": date(2026, 6, 1),
+        }
+    )
+    config = _design_config(tmp_path)
+    dataset = build_examples(dated_session, config, builder, store=store)
+
+    emp_examples = [
+        e
+        for e in dataset.examples
+        if "[task]" in e.task_text and e.label_provenance == PROVENANCE_EMPIRICAL
+    ]
+    assert len(emp_examples) > 0
+
+    emp_pairs = [
+        p
+        for p in dataset.pairs
+        if p.task_id.startswith("task-emp-") and p.label_provenance == PROVENANCE_EMPIRICAL
+    ]
+    assert len(emp_pairs) > 0
+
+    # Verify pairwise preferences formed between empirical examples
+    emp_cand_keys = {e.candidate.key for e in emp_examples}
+    pairs_between_emp = [
+        p
+        for p in emp_pairs
+        if p.candidate_a.key in emp_cand_keys and p.candidate_b.key in emp_cand_keys
+    ]
+    assert len(pairs_between_emp) > 0
+

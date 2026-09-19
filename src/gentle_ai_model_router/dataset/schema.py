@@ -16,6 +16,7 @@ FEATURE_SCHEMA_VERSION = "1"
 NORMALIZATION_VERSION = "1"  # internal effort taxonomy (registry/normalize.py)
 PROVENANCE_BOOTSTRAP = "bootstrap_prior"
 PROVENANCE_TELEMETRY = "telemetry"
+PROVENANCE_EMPIRICAL = "empirical_benchmark"
 
 # Fixed-width numeric vectors. Order is part of FEATURE_SCHEMA_VERSION.
 MODEL_FEATURE_NAMES: tuple[str, ...] = (
@@ -61,7 +62,7 @@ class DatasetExample:
     cost_features: dict[str, float]
     label_utility: float  # 0..1
     label_quality_estimate: float  # 0..1
-    label_provenance: str  # PROVENANCE_BOOTSTRAP | PROVENANCE_TELEMETRY
+    label_provenance: str  # PROVENANCE_BOOTSTRAP | PROVENANCE_TELEMETRY | PROVENANCE_EMPIRICAL
     snapshot_date: str  # ISO date: max date of this example's source snapshots
     split: str = ""  # train | validation | test | temporal_test
 
@@ -116,6 +117,14 @@ class DatasetV1:
         return counts
 
     def manifest(self) -> dict[str, Any]:
+        provenances = sorted({e.label_provenance for e in self.examples if e.label_provenance})
+        if not provenances:
+            label_prov = PROVENANCE_BOOTSTRAP
+        elif len(provenances) == 1:
+            label_prov = provenances[0]
+        else:
+            label_prov = "+".join(provenances)
+
         return {
             "dataset_version": self.version,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -128,7 +137,7 @@ class DatasetV1:
             "pair_count": len(self.pairs),
             "model_feature_names": list(self.model_feature_names),
             "benchmark_feature_names": list(self.benchmark_feature_names),
-            "label_provenance": PROVENANCE_BOOTSTRAP,
+            "label_provenance": label_prov,
             "label_provenance_statement": self.label_provenance_statement,
             "dropped_train_task_overlap": self.dropped_train_task_overlap,
             "git_commit": self.git_commit,

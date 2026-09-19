@@ -32,15 +32,19 @@ import subprocess
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from gentle_ai_model_router.collector.routing_benchmarks import map_task_to_phase
+from gentle_ai_model_router.collector.snapshots import SnapshotStore
 from gentle_ai_model_router.dataset.schema import (
     FEATURE_SCHEMA_VERSION,
     MODEL_FEATURE_NAMES,
     PROVENANCE_BOOTSTRAP,
+    PROVENANCE_EMPIRICAL,
     PROVENANCE_STATEMENT,
     CandidateRef,
     DatasetExample,
@@ -99,6 +103,10 @@ class DatasetBuilderConfig(BaseModel):
     # Quality threshold conditioning:
     threshold_penalty: float = 0.0
     hard_threshold: bool = False
+    # Empirical benchmark tasks
+    include_empirical_benchmarks: bool = True
+    empirical_snapshot_source: str = "routing-benchmarks"
+    max_empirical_tasks_per_phase: int = 30
     # Temporal split (required — forcing an explicit decision is deliberate).
     train_end: date
     val_end: date | None = None
@@ -200,6 +208,291 @@ def _model_feature_vector(
     ]
 
 
+def _extract_empirical_samples(data: Any) -> list[dict[str, Any]]:
+    """Extract normalized samples across dars, xroutebench, and compendium."""
+    if not isinstance(data, dict):
+        if isinstance(data, list):
+            res = []
+            for item in data:
+                if isinstance(item, dict):
+                    task_name = str(
+                        item.get("task_name")
+                        or item.get("task")
+                        or item.get("dataset")
+                        or "benchmark"
+                    )
+                    prompt = str(
+                        item.get("prompt")
+                        or item.get("input_question")
+                        or item.get("question")
+                        or item.get("query")
+                        or ""
+                    )
+                    phase = str(
+                        item.get("mapped_phase")
+                        or item.get("phase")
+                        or map_task_to_phase(task_name)
+                    )
+                    model = str(item.get("model") or item.get("model_name") or "")
+                    res.append(
+                        {
+                            "task_name": task_name,
+                            "prompt": prompt,
+                            "model": model,
+                            "model_name": model,
+                            "quality": item.get(
+                                "quality", item.get("performance", item.get("score", 0.5))
+                            ),
+                            "cost": item.get("cost", 0.0),
+                            "input_tokens": item.get("input_tokens")
+                            or item.get("prompt_tokens")
+                            or 1000,
+                            "phase": phase,
+                            "mapped_phase": phase,
+                        }
+                    )
+            return res
+        return []
+
+    samples: list[dict[str, Any]] = []
+
+    # 1. dars
+    dars = data.get("dars")
+    if isinstance(dars, list):
+        for item in dars:
+            if isinstance(item, dict):
+                task_name = str(item.get("task_name") or item.get("task") or "drop-800")
+                prompt = str(
+                    item.get("prompt")
+                    or item.get("input_question")
+                    or item.get("question")
+                    or ""
+                )
+                phase = str(
+                    item.get("mapped_phase")
+                    or item.get("phase")
+                    or map_task_to_phase(task_name)
+                )
+                model = str(item.get("model") or item.get("model_name") or "")
+                quality = (
+                    item.get("quality")
+                    if item.get("quality") is not None
+                    else item.get("score", 0.5)
+                )
+                input_tokens = item.get("input_tokens") or item.get("prompt_tokens") or 1000
+                cost = item.get("cost", 0.0)
+                samples.append(
+                    {
+                        "task_name": task_name,
+                        "prompt": prompt,
+                        "model": model,
+                        "model_name": model,
+                        "quality": quality,
+                        "cost": cost,
+                        "input_tokens": input_tokens,
+                        "phase": phase,
+                        "mapped_phase": phase,
+                    }
+                )
+
+    # 2. xroutebench
+    xrb = data.get("xroutebench")
+    if isinstance(xrb, list):
+        for item in xrb:
+            if isinstance(item, dict):
+                task_name = str(item.get("task_name") or item.get("task") or "benchmark")
+                prompt = str(item.get("prompt") or item.get("query") or "")
+                phase = str(
+                    item.get("mapped_phase")
+                    or item.get("phase")
+                    or map_task_to_phase(task_name)
+                )
+                model = str(item.get("model_name") or item.get("model") or "")
+                quality = (
+                    item.get("performance")
+                    if item.get("performance") is not None
+                    else item.get("score", 0.5)
+                )
+                input_tokens = item.get("input_tokens") or item.get("prompt_tokens") or 1000
+                cost = item.get("cost", 0.0)
+                samples.append(
+                    {
+                        "task_name": task_name,
+                        "prompt": prompt,
+                        "model": model,
+                        "model_name": model,
+                        "quality": quality,
+                        "cost": cost,
+                        "input_tokens": input_tokens,
+                        "phase": phase,
+                        "mapped_phase": phase,
+                    }
+                )
+
+    # 3. compendium
+    comp = data.get("compendium")
+    if isinstance(comp, list):
+        for item in comp:
+            if isinstance(item, dict):
+                task_name = str(
+                    item.get("dataset")
+                    or item.get("task_name")
+                    or item.get("task")
+                    or "benchmark"
+                )
+                prompt = str(item.get("prompt") or item.get("query") or "")
+                phase = str(
+                    item.get("mapped_phase")
+                    or item.get("phase")
+                    or map_task_to_phase(task_name)
+                )
+                models_name = item.get("models_name") or item.get("models")
+                models_perf = item.get("models_performance") or item.get("performance")
+                input_tokens = item.get("input_tokens") or item.get("prompt_tokens") or 1000
+                cost = item.get("cost", 0.0)
+                if isinstance(models_name, (list, tuple)) and isinstance(
+                    models_perf, (list, tuple)
+                ):
+                    for m, p in zip(models_name, models_perf, strict=False):
+                        samples.append(
+                            {
+                                "task_name": task_name,
+                                "prompt": prompt,
+                                "model": str(m),
+                                "model_name": str(m),
+                                "quality": p,
+                                "cost": cost,
+                                "input_tokens": input_tokens,
+                                "phase": phase,
+                                "mapped_phase": phase,
+                            }
+                        )
+                else:
+                    model = str(item.get("model") or item.get("model_name") or "")
+                    quality = item.get(
+                        "quality", item.get("performance", item.get("score", 0.5))
+                    )
+                    samples.append(
+                        {
+                            "task_name": task_name,
+                            "prompt": prompt,
+                            "model": model,
+                            "model_name": model,
+                            "quality": quality,
+                            "cost": cost,
+                            "input_tokens": input_tokens,
+                            "phase": phase,
+                            "mapped_phase": phase,
+                        }
+                    )
+
+    # 4. Direct samples fallback
+    samples_list = data.get("samples")
+    if isinstance(samples_list, list):
+        for item in samples_list:
+            if isinstance(item, dict):
+                task_name = str(
+                    item.get("task_name")
+                    or item.get("task")
+                    or item.get("dataset")
+                    or "benchmark"
+                )
+                prompt = str(
+                    item.get("prompt")
+                    or item.get("input_question")
+                    or item.get("question")
+                    or item.get("query")
+                    or ""
+                )
+                phase = str(
+                    item.get("mapped_phase")
+                    or item.get("phase")
+                    or map_task_to_phase(task_name)
+                )
+                model = str(item.get("model") or item.get("model_name") or "")
+                quality = item.get(
+                    "quality", item.get("performance", item.get("score", 0.5))
+                )
+                input_tokens = item.get("input_tokens") or item.get("prompt_tokens") or 1000
+                cost = item.get("cost", 0.0)
+                samples.append(
+                    {
+                        "task_name": task_name,
+                        "prompt": prompt,
+                        "model": model,
+                        "model_name": model,
+                        "quality": quality,
+                        "cost": cost,
+                        "input_tokens": input_tokens,
+                        "phase": phase,
+                        "mapped_phase": phase,
+                    }
+                )
+
+    return samples
+
+
+def _match_candidate_model(
+    model: Model, task_group: dict[str, Any]
+) -> tuple[bool, float, float | None]:
+    """Check if candidate model matches empirical sample; return (matched, quality, cost)."""
+    canonical = model.canonical_id.strip().lower()
+    name = (model.name or "").strip().lower()
+    short = canonical.split("/")[-1] if "/" in canonical else canonical
+    candidates = {canonical, name, short}
+
+    # Check task_group["models"] dictionary if grouped
+    models_dict = task_group.get("models")
+    if isinstance(models_dict, dict):
+        for raw_m, eval_data in models_dict.items():
+            m_str = str(raw_m).strip().lower()
+            m_short = m_str.split("/")[-1] if "/" in m_str else m_str
+            if m_str in candidates or m_short in candidates:
+                raw_q = eval_data.get("quality")
+                if raw_q is None:
+                    raw_q = eval_data.get("performance")
+                if raw_q is None:
+                    raw_q = eval_data.get("score")
+                if raw_q is None:
+                    raw_q = 0.5
+                try:
+                    q = float(raw_q)
+                except (ValueError, TypeError):
+                    q = 0.5
+                c = eval_data.get("cost")
+                try:
+                    cost_val = float(c) if c is not None else None
+                except (ValueError, TypeError):
+                    cost_val = None
+                return True, q, cost_val
+
+    # Check task_group.get("model") or task_group.get("model_name")
+    raw_m = task_group.get("model") or task_group.get("model_name")
+    if raw_m:
+        m_str = str(raw_m).strip().lower()
+        m_short = m_str.split("/")[-1] if "/" in m_str else m_str
+        if m_str in candidates or m_short in candidates:
+            raw_q = task_group.get("quality")
+            if raw_q is None:
+                raw_q = task_group.get("performance")
+            if raw_q is None:
+                raw_q = task_group.get("score")
+            if raw_q is None:
+                raw_q = 0.5
+            try:
+                q = float(raw_q)
+            except (ValueError, TypeError):
+                q = 0.5
+            c = task_group.get("cost")
+            try:
+                cost_val = float(c) if c is not None else None
+            except (ValueError, TypeError):
+                cost_val = None
+            return True, q, cost_val
+
+    return False, 0.5, None
+
+
 # --------------------------------------------------------------------------- #
 # Build
 # --------------------------------------------------------------------------- #
@@ -209,8 +502,11 @@ def build_examples(
     session: Session,
     config: RouterConfig,
     builder: DatasetBuilderConfig,
+    store: SnapshotStore | None = None,
 ) -> DatasetV1:
     """Generate DatasetV1 from registry priors. Deterministic; no randomness."""
+    if store is None:
+        store = SnapshotStore(config.data_dir / "snapshots")
     snapshot_dates = _snapshot_dates(session)
     if not snapshot_dates:
         raise DatasetBuildError(
@@ -389,6 +685,149 @@ def build_examples(
                     )
                     staged.append((example, model.id))
 
+    # --- empirical benchmark tasks ------------------------------------------ #
+    if builder.include_empirical_benchmarks:
+        latest_snap = store.latest(builder.empirical_snapshot_source)
+        if latest_snap:
+            snap_id = latest_snap.get("snapshot_id")
+            if snap_id and snap_id not in dataset.source_snapshot_ids:
+                dataset.source_snapshot_ids.append(snap_id)
+            payload = (
+                latest_snap.get("data")
+                if isinstance(latest_snap, dict) and "data" in latest_snap
+                else latest_snap
+            )
+            raw_samples = _extract_empirical_samples(payload)
+            for phase in builder.phases:
+                priors = priors_by_phase[phase]
+                phase_samples = [
+                    s
+                    for s in raw_samples
+                    if (s.get("phase") or s.get("mapped_phase")) == phase
+                ]
+                # Group samples by (task_name, prompt) to allow multiple model
+                # evals on the same task.
+                task_groups: dict[tuple[str, str], dict[str, Any]] = {}
+                for s in phase_samples:
+                    t_name = str(s.get("task_name") or "benchmark")
+                    p_text = str(s.get("prompt") or "")
+                    key = (t_name, p_text)
+                    if key not in task_groups:
+                        if len(task_groups) >= builder.max_empirical_tasks_per_phase:
+                            continue
+                        task_groups[key] = {
+                            "task_name": t_name,
+                            "prompt": p_text,
+                            "phase": phase,
+                            "input_tokens": s.get("input_tokens") or 1000,
+                            "models": {},
+                        }
+                    m = s.get("model") or s.get("model_name")
+                    if m:
+                        task_groups[key]["models"][m] = {
+                            "quality": s.get(
+                                "quality",
+                                s.get("performance", s.get("score", 0.5)),
+                            ),
+                            "cost": s.get("cost", 0.0),
+                        }
+                        if "model" not in task_groups[key]:
+                            task_groups[key]["model"] = m
+                            task_groups[key]["quality"] = s.get(
+                                "quality",
+                                s.get("performance", s.get("score", 0.5)),
+                            )
+                            task_groups[key]["cost"] = s.get("cost", 0.0)
+
+                for task_group in task_groups.values():
+                    t_name = task_group.get("task_name", "")
+                    p_text = task_group.get("prompt", "")
+                    task_id = "task-emp-" + hashlib.sha256(
+                        f"{phase}:{t_name}:{p_text}".encode()
+                    ).hexdigest()[:16]
+                    task_text = (
+                        f"[phase] {phase}\n"
+                        f"[task_type] {task_group.get('task_name', 'benchmark')}\n"
+                        f"[task] {str(p_text)[:400].strip()}"
+                    )
+                    input_tokens = int(task_group.get("input_tokens") or 1000)
+
+                    for model, _provider, deployment, variant in raw:
+                        base = max(policy.base_tokens, input_tokens)
+                        multiplier = policy.effort_token_multiplier.get(variant.effort, 1.0)
+                        est_tokens = base * multiplier
+                        group_key = (phase, task_id)
+                        group_tokens[group_key] = max(
+                            group_tokens.get(group_key, 0.0), est_tokens
+                        )
+
+                        price = price_by_deployment.get(deployment.id)
+                        in_p = (
+                            price.input_price
+                            if price and price.input_price is not None
+                            else policy.default_input_price
+                        )
+                        out_p = (
+                            price.output_price
+                            if price and price.output_price is not None
+                            else policy.default_output_price
+                        )
+                        est_cost = estimate_cost(policy, in_p, out_p, est_tokens)
+
+                        matched, match_q, match_cost = _match_candidate_model(
+                            model, task_group
+                        )
+                        if matched:
+                            quality = match_q
+                            if match_cost is not None and match_cost > 0.0:
+                                est_cost = match_cost
+                            label_provenance = PROVENANCE_EMPIRICAL
+                        else:
+                            quality = effort_quality(priors[model.id], variant.effort, policy)
+                            label_provenance = PROVENANCE_BOOTSTRAP
+
+                        dates = model_source_dates[model.id]
+                        example_date = max(dates) if dates else newest_snapshot_date
+
+                        example = DatasetExample(
+                            example_id="",
+                            task_id=task_id,
+                            phase=phase,
+                            task_type=task_group.get("task_name", "benchmark"),
+                            context_tokens=input_tokens,
+                            task_text=task_text,
+                            candidate=CandidateRef(
+                                model=model.canonical_id,
+                                deployment=deployment.deployment_ref,
+                                effort=variant.effort,
+                            ),
+                            model_features=_model_feature_vector(
+                                model,
+                                price,
+                                (in_p, out_p),
+                                tps_proxy=(
+                                    speed_rows[model.id] / speed_top
+                                    if speed_rows and speed_top and model.id in speed_rows
+                                    else 0.0
+                                ),
+                            ),
+                            benchmark_features=[
+                                scores.get((model.id, k), 0.0) for k in bench_names
+                            ],
+                            benchmark_feature_names=bench_names,
+                            cost_features={
+                                "est_input_tokens": est_tokens * (1 - policy.output_fraction),
+                                "est_output_tokens": est_tokens * policy.output_fraction,
+                                "est_total_tokens": est_tokens,
+                                "est_cost": est_cost,
+                            },
+                            label_utility=0.0,
+                            label_quality_estimate=quality,
+                            label_provenance=label_provenance,
+                            snapshot_date=example_date.isoformat(),
+                        )
+                        staged.append((example, model.id))
+
     for example, mid in staged:
         max_tokens = group_tokens[(example.phase, example.task_id)]
         penalty = (
@@ -466,6 +905,14 @@ def build_examples(
                 pair_date = max(a.snapshot_date, b.snapshot_date)
                 mid_a = canonical_to_id[a.candidate.model]
                 mid_b = canonical_to_id[b.candidate.model]
+                pair_provenance = (
+                    PROVENANCE_EMPIRICAL
+                    if (
+                        a.label_provenance == PROVENANCE_EMPIRICAL
+                        or b.label_provenance == PROVENANCE_EMPIRICAL
+                    )
+                    else PROVENANCE_BOOTSTRAP
+                )
                 dataset.pairs.append(
                     PreferencePair(
                         pair_id="pr-" + hashlib.sha256(
@@ -478,7 +925,7 @@ def build_examples(
                         score_a=a.label_utility,
                         score_b=b.label_utility,
                         margin=margin,
-                        label_provenance=PROVENANCE_BOOTSTRAP,
+                        label_provenance=pair_provenance,
                         snapshot_date=pair_date,
                         split=_pair_split(pair_date, mid_a, mid_b),
                     )

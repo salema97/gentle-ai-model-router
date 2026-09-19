@@ -31,6 +31,9 @@ from gentle_ai_model_router.collector.local_discovery import (
     collect_local_candidates,
 )
 from gentle_ai_model_router.collector.logging_conf import setup_logging
+from gentle_ai_model_router.collector.routing_benchmarks import (
+    RoutingBenchmarksCollector,
+)
 from gentle_ai_model_router.collector.snapshots import SnapshotRecord, SnapshotStore
 from gentle_ai_model_router.integration import gentle_state_adapter as gs
 from gentle_ai_model_router.integration import opencode_adapter as oa
@@ -137,6 +140,17 @@ def _collect_telemetry(config: RouterConfig, store: SnapshotStore) -> SnapshotRe
         collector.close()
 
 
+def _collect_benchmarks(config: RouterConfig, store: SnapshotStore) -> SnapshotRecord:
+    collector = RoutingBenchmarksCollector(config.data_sources.routing_benchmarks, store)
+    try:
+        return collector.collect()
+    except Exception as exc:
+        err_console.print(f"[red]error: benchmarks collection failed: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        collector.close()
+
+
 def _print_local_result(result: DiscoveryResult) -> None:
     table = Table(title="local candidates")
     table.add_column("model")
@@ -159,7 +173,9 @@ def _print_local_result(result: DiscoveryResult) -> None:
 @app.command()
 def collect(
     source: str = typer.Option(
-        ..., "--source", help="Data source: aa | arena | local | telemetry | all."
+        ...,
+        "--source",
+        help="Data source: aa | arena | local | telemetry | benchmarks | all.",
     ),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
@@ -169,7 +185,7 @@ def collect(
     ),
 ) -> None:
     """Collect from a data source into the snapshot store."""
-    valid = {"aa", "arena", "local", "telemetry", "all"}
+    valid = {"aa", "arena", "local", "telemetry", "benchmarks", "all"}
     if source not in valid:
         err_console.print(
             f"[red]error: unknown source '{source}' (expected one of {sorted(valid)})[/red]"
@@ -193,6 +209,13 @@ def collect(
             err_console.print(
                 f"[yellow]warning: {len(record.errors)} error(s) recorded in snapshot meta[/yellow]"
             )
+    if source in {"benchmarks", "all"}:
+        record = _collect_benchmarks(config, store)
+        _print_record(record)
+        if record.errors:
+            err_console.print(
+                f"[yellow]warning: {len(record.errors)} error(s) recorded in snapshot meta[/yellow]"
+            )
     if source in {"local", "all"}:
         result = collect_local_candidates(config.data_sources.local_discovery)
         _print_local_result(result)
@@ -204,11 +227,13 @@ def normalize(
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
     source: str = typer.Option(
-        "all", "--source", help="Snapshots to apply: aa | arena | local | telemetry | all."
+        "all",
+        "--source",
+        help="Snapshots to apply: aa | arena | local | telemetry | benchmarks | all.",
     ),
 ) -> None:
     """Load latest snapshots and upsert them into the registry."""
-    valid = {"aa", "arena", "local", "telemetry", "all"}
+    valid = {"aa", "arena", "local", "telemetry", "benchmarks", "all"}
     if source not in valid:
         err_console.print(f"[red]error: unknown source '{source}'[/red]")
         raise typer.Exit(code=2)
@@ -242,6 +267,16 @@ def normalize(
                 )
             else:
                 applied["gentle-telemetry"] = registry_db.apply_telemetry_snapshot(session, doc)
+        if source in {"benchmarks", "all"}:
+            doc = store.latest("routing-benchmarks")
+            if doc is None:
+                err_console.print(
+                    "[yellow]warning: no routing-benchmarks snapshot to normalize[/yellow]"
+                )
+            else:
+                applied["routing-benchmarks"] = (
+                    registry_db.apply_routing_benchmarks_snapshot(session, doc)
+                )
         if source in {"local", "all"}:
             local_result = collect_local_candidates(config.data_sources.local_discovery)
             applied["local"] = registry_db.apply_local_candidates(session, local_result.candidates)
@@ -967,6 +1002,12 @@ def build_dataset(
         list[str] | None,
         typer.Option("--phase", help="Phase to include (repeatable). Default: all."),
     ] = None,
+    include_empirical: bool = typer.Option(
+        True, "--empirical/--no-empirical", help="Include empirical benchmark prompts in dataset."
+    ),
+    max_empirical_tasks: int = typer.Option(
+        30, "--max-empirical-tasks", help="Max empirical tasks per phase."
+    ),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
 ) -> None:
@@ -980,7 +1021,7 @@ def build_dataset(
         write_dataset,
     )
 
-    config, _ = _load_ctx(config_path, data_dir)
+    config, store = _load_ctx(config_path, data_dir)
     builder_kwargs: dict = {
         "name": name,
         "train_end": date.fromisoformat(train_end),
@@ -990,6 +1031,8 @@ def build_dataset(
         "phases": phase or list(CANONICAL_PHASES),
         "threshold_penalty": threshold_penalty,
         "hard_threshold": hard_threshold,
+        "include_empirical_benchmarks": include_empirical,
+        "max_empirical_tasks_per_phase": max_empirical_tasks,
     }
     if pair_margin is not None:
         builder_kwargs["pair_margin"] = pair_margin
@@ -1007,7 +1050,7 @@ def build_dataset(
     registry_db.init_schema(engine)
     try:
         with registry_db.Session(engine) as session:
-            dataset = build_examples(session, config, builder)
+            dataset = build_examples(session, config, builder, store=store)
             out_dir = write_dataset(dataset, config.data_dir, builder=builder)
     except DatasetBuildError as exc:
         err_console.print(f"[red]error: {exc}[/red]")

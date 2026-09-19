@@ -6,6 +6,7 @@ in the CLI's data dir, then both commands run end-to-end.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 import pytest
@@ -61,6 +62,31 @@ def test_cli_build_dataset_smoke(tmp_path) -> None:
     assert (out_dir / "examples.parquet").exists()
     assert (out_dir / "pairs.parquet").exists()
     assert (out_dir / "manifest.json").exists()
+
+
+def test_cli_build_dataset_with_threshold_options(tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    _seed_registry(data_dir)
+    result = runner.invoke(
+        app,
+        [
+            "build-dataset",
+            "--name", "thresh_smoke",
+            "--train-end", "2026-02-15",
+            "--val-end", "2026-02-20",
+            "--phase", "design",
+            "--threshold-penalty", "0.15",
+            "--hard-threshold",
+            "--cost-weight", "0.4",
+            "--data-dir", str(data_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    out_dir = data_dir / "datasets" / "thresh_smoke" / "v1"
+    assert (out_dir / "manifest.json").exists()
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert manifest["threshold_penalty"] == 0.15
+    assert manifest["hard_threshold"] is True
 
 
 def test_cli_evaluate_baselines_only_smoke(tmp_path) -> None:

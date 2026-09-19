@@ -30,12 +30,12 @@ from gentle_ai_model_router.router.decision import (
     Decision,
     TaskContext,
 )
+from gentle_ai_model_router.router.neural import neural_rerank
 from gentle_ai_model_router.router.policy import (
     PolicyError,
     full_policy_version,
     normalize_phase,
     rank_candidates,
-    select_candidate,
 )
 
 logger = logging.getLogger(__name__)
@@ -167,6 +167,7 @@ def create_app(
     config: RouterConfig,
     engine: Engine,
     shim_store: telemetry_shim.ShimStore | None = None,
+    ranker: Any | None = None,
 ) -> FastAPI:
     """Build the FastAPI app over a registry engine + router config.
 
@@ -176,6 +177,7 @@ def create_app(
     changes.
     """
     app = FastAPI(title="gentle-ai-model-router", version="0.3.0")
+    app.state.ranker = ranker
     # registry_hash -> full policy payload. Bounded: fingerprints are 16-hex,
     # and old entries are dropped whenever the hash rotates.
     policy_cache: dict[str, dict[str, Any]] = {}
@@ -203,49 +205,52 @@ def create_app(
         )
         try:
             with registry_db.Session(engine) as session:
-                if request.available_models is not None or efforts:
-                    # Hard-filtered path: recompute the ranking over the
-                    # restricted candidate set (fails closed on empty).
-                    ranking = rank_candidates(
-                        session,
-                        phase,
-                        config,
-                        context,
-                        allowed_models=set(request.available_models)
-                        if request.available_models is not None
-                        else None,
-                        allowed_efforts=set(efforts) if efforts else None,
+                ranking = rank_candidates(
+                    session,
+                    phase,
+                    config,
+                    context,
+                    allowed_models=set(request.available_models)
+                    if request.available_models is not None
+                    else None,
+                    allowed_efforts=set(efforts) if efforts else None,
+                )
+                if app.state.ranker is not None and request.task:
+                    ranking = neural_rerank(
+                        session, ranking, app.state.ranker, request.task, config
                     )
-                    winner = ranking.candidates[0]
-                    decision = Decision(
-                        phase=ranking.phase,
-                        model=winner.model.canonical_id,
-                        provider=winner.provider.registry_key,
-                        deployment=winner.deployment.deployment_ref,
-                        effort=winner.variant.effort,
-                        score=winner.score,
-                        quality=winner.quality,
-                        alternatives=tuple(
-                            Alternative(
-                                model=c.model.canonical_id,
-                                provider=c.provider.registry_key,
-                                deployment=c.deployment.deployment_ref,
-                                effort=c.variant.effort,
-                                score=c.score,
-                                quality=c.quality,
-                                estimated_tokens=c.estimated_tokens,
-                            )
-                            for c in ranking.candidates[1 : config.policy.top_k]
-                        ),
-                        reason_codes=tuple(winner.reason_codes) + ("cheapest_of_meeting",),
-                        estimated_tokens=winner.estimated_tokens,
-                        estimated_cost=winner.estimated_cost,
-                        policy_version=ranking.policy_version,
-                    )
-                    candidate_count = len(ranking.candidates)
-                else:
-                    decision = select_candidate(session, phase, config, context)
-                    candidate_count = 1 + len(decision.alternatives)
+
+                winner = ranking.candidates[0]
+                reasons = list(winner.reason_codes)
+                if "neural_ranker:onnx" not in reasons and "cheapest_of_meeting" not in reasons:
+                    reasons.append("cheapest_of_meeting")
+
+                decision = Decision(
+                    phase=ranking.phase,
+                    model=winner.model.canonical_id,
+                    provider=winner.provider.registry_key,
+                    deployment=winner.deployment.deployment_ref,
+                    effort=winner.variant.effort,
+                    score=winner.score,
+                    quality=winner.quality,
+                    alternatives=tuple(
+                        Alternative(
+                            model=c.model.canonical_id,
+                            provider=c.provider.registry_key,
+                            deployment=c.deployment.deployment_ref,
+                            effort=c.variant.effort,
+                            score=c.score,
+                            quality=c.quality,
+                            estimated_tokens=c.estimated_tokens,
+                        )
+                        for c in ranking.candidates[1 : config.policy.top_k]
+                    ),
+                    reason_codes=tuple(reasons),
+                    estimated_tokens=winner.estimated_tokens,
+                    estimated_cost=round(winner.estimated_cost, 6),
+                    policy_version=ranking.policy_version,
+                )
+                candidate_count = len(ranking.candidates)
         except PolicyError as exc:
             # Fail closed, same semantics as the CLI: empty registry / no
             # candidate after hard filters / threshold unreachable → 503.
@@ -262,6 +267,7 @@ def create_app(
             "status": "ok",
             "registry_hash": _current_hash(),
             "policy_version": full_policy_version(config),
+            "ranker": "onnx" if app.state.ranker is not None else "none",
         }
 
     @app.get("/policy")

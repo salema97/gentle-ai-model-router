@@ -23,12 +23,16 @@ from gentle_ai_model_router.collector.artificial_analysis import (
     ArtificialAnalysisCollector,
     QuotaExceededError,
 )
+from gentle_ai_model_router.collector.gentle_telemetry import (
+    GentleTelemetryCollector,
+)
 from gentle_ai_model_router.collector.local_discovery import (
     DiscoveryResult,
     collect_local_candidates,
 )
 from gentle_ai_model_router.collector.logging_conf import setup_logging
 from gentle_ai_model_router.collector.snapshots import SnapshotRecord, SnapshotStore
+from gentle_ai_model_router.integration import gentle_state_adapter as gs
 from gentle_ai_model_router.integration import opencode_adapter as oa
 from gentle_ai_model_router.integration import telemetry_shim
 from gentle_ai_model_router.registry import db as registry_db
@@ -50,11 +54,18 @@ app = typer.Typer(
 snapshots_app = typer.Typer(help="Snapshot inspection.", no_args_is_help=True)
 registry_app = typer.Typer(help="Registry inspection.", no_args_is_help=True)
 integrate_app = typer.Typer(help="Write decisions into runtime configs.", no_args_is_help=True)
+gentle_state_app = typer.Typer(
+    help="Write model_assignments into the Gentle AI state file "
+    "(~/.gentle-ai/state.json) — the correct surface for Gentle-AI-managed setups.",
+    no_args_is_help=True,
+    invoke_without_command=True,
+)
 shim_app = typer.Typer(help="Telemetry shim ingestion.", no_args_is_help=True)
 app.add_typer(snapshots_app, name="snapshots")
 app.add_typer(registry_app, name="registry")
 app.add_typer(integrate_app, name="integrate")
 app.add_typer(shim_app, name="shim")
+integrate_app.add_typer(gentle_state_app, name="gentle-state")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -115,6 +126,17 @@ def _collect_arena(config: RouterConfig, store: SnapshotStore) -> SnapshotRecord
         raise typer.Exit(code=1) from exc
 
 
+def _collect_telemetry(config: RouterConfig, store: SnapshotStore) -> SnapshotRecord:
+    collector = GentleTelemetryCollector(config.data_sources.gentle_telemetry, store)
+    try:
+        return collector.collect()
+    except Exception as exc:
+        err_console.print(f"[red]error: telemetry collection failed: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        collector.close()
+
+
 def _print_local_result(result: DiscoveryResult) -> None:
     table = Table(title="local candidates")
     table.add_column("model")
@@ -137,7 +159,7 @@ def _print_local_result(result: DiscoveryResult) -> None:
 @app.command()
 def collect(
     source: str = typer.Option(
-        ..., "--source", help="Data source: aa | arena | local | all."
+        ..., "--source", help="Data source: aa | arena | local | telemetry | all."
     ),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
@@ -147,7 +169,7 @@ def collect(
     ),
 ) -> None:
     """Collect from a data source into the snapshot store."""
-    valid = {"aa", "arena", "local", "all"}
+    valid = {"aa", "arena", "local", "telemetry", "all"}
     if source not in valid:
         err_console.print(
             f"[red]error: unknown source '{source}' (expected one of {sorted(valid)})[/red]"
@@ -164,6 +186,13 @@ def collect(
     if source in {"arena", "all"}:
         record = _collect_arena(config, store)
         _print_record(record)
+    if source in {"telemetry", "all"}:
+        record = _collect_telemetry(config, store)
+        _print_record(record)
+        if record.errors:
+            err_console.print(
+                f"[yellow]warning: {len(record.errors)} error(s) recorded in snapshot meta[/yellow]"
+            )
     if source in {"local", "all"}:
         result = collect_local_candidates(config.data_sources.local_discovery)
         _print_local_result(result)
@@ -175,11 +204,11 @@ def normalize(
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
     source: str = typer.Option(
-        "all", "--source", help="Snapshots to apply: aa | arena | local | all."
+        "all", "--source", help="Snapshots to apply: aa | arena | local | telemetry | all."
     ),
 ) -> None:
     """Load latest snapshots and upsert them into the registry."""
-    valid = {"aa", "arena", "local", "all"}
+    valid = {"aa", "arena", "local", "telemetry", "all"}
     if source not in valid:
         err_console.print(f"[red]error: unknown source '{source}'[/red]")
         raise typer.Exit(code=2)
@@ -205,6 +234,14 @@ def normalize(
                 err_console.print("[yellow]warning: no lmarena snapshot to normalize[/yellow]")
             else:
                 applied["lmarena"] = registry_db.apply_arena_snapshot(session, doc)
+        if source in {"telemetry", "all"}:
+            doc = store.latest("gentle-telemetry")
+            if doc is None:
+                err_console.print(
+                    "[yellow]warning: no gentle-telemetry snapshot to normalize[/yellow]"
+                )
+            else:
+                applied["gentle-telemetry"] = registry_db.apply_telemetry_snapshot(session, doc)
         if source in {"local", "all"}:
             local_result = collect_local_candidates(config.data_sources.local_discovery)
             applied["local"] = registry_db.apply_local_candidates(session, local_result.candidates)
@@ -342,6 +379,9 @@ def serve(
     port: int | None = typer.Option(None, "--port", help="Bind port (default: config api.port)."),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+    ranker: str | None = typer.Option(
+        None, "--ranker", help="Path to ONNX ranker directory or model file."
+    ),
 ) -> None:
     """Serve the routing API over uvicorn (localhost by default, local-first)."""
     import uvicorn
@@ -355,7 +395,28 @@ def serve(
         shim_url = f"sqlite:///{shim_url}"  # plain SQLite path → SQLAlchemy URL
     shim_store = telemetry_shim.ShimStore(shim_url)
     shim_store.init_schema()
-    api_app = create_app(config, engine, shim_store)
+
+    ranker_instance: Any | None = None
+    default_onnx = Path("models/deberta-router/v9/model.quant.onnx")
+    if ranker is not None:
+        from gentle_ai_model_router.training.onnx_export import OnnxRanker
+
+        ranker_p = Path(ranker)
+        if ranker_p.is_file():
+            ranker_instance = OnnxRanker(ranker_p.parent, model_path=ranker_p)
+        else:
+            ranker_instance = OnnxRanker(ranker_p)
+    elif default_onnx.exists():
+        try:
+            from gentle_ai_model_router.training.onnx_export import OnnxRanker
+
+            ranker_instance = OnnxRanker(default_onnx.parent, model_path=default_onnx)
+        except Exception as exc:
+            err_console.print(
+                f"[yellow]warning: could not auto-load default ONNX ranker: {exc}[/yellow]"
+            )
+
+    api_app = create_app(config, engine, shim_store, ranker=ranker_instance)
     bind_host = host or config.api.host
     bind_port = port or config.api.port
     console.print(f"serving gentle-ai-model-router on http://{bind_host}:{bind_port}")
@@ -708,6 +769,149 @@ def integrate_status(
     console.print(table)
 
 
+def _print_gentle_state_followup() -> None:
+    console.print("next step — run it yourself (the router NEVER runs sync):")
+    console.print("  gentle-ai sync --sdd-profile-strategy external-single-active")
+    err_console.print(
+        "[yellow]WARNING: gentle-ai sync REGENERATES the opencode agent configs from[/yellow]"
+    )
+    err_console.print(
+        "[yellow]this state file ('model_assignments'); hand-edited agent blocks in[/yellow]"
+    )
+    err_console.print(
+        "[yellow]opencode.json will be overwritten. 'external-single-active' is the[/yellow]"
+    )
+    err_console.print(
+        "[yellow]profile strategy designed for external tooling "
+        "(docs/opencode-profiles.md).[/yellow]"
+    )
+    err_console.print(
+        "[yellow]For configs with NO __managed_by: gentle-ai/sdd blocks (unmanaged),[/yellow]"
+    )
+    err_console.print("[yellow]use 'router integrate opencode' instead.[/yellow]")
+
+
+@gentle_state_app.callback()
+def integrate_gentle_state(
+    ctx: typer.Context,
+    phase: str | None = typer.Option(None, "--phase", help="SDD phase."),
+    model: str | None = typer.Option(None, "--model", help="provider/model."),
+    effort: str | None = typer.Option(None, "--effort", help="Reasoning effort level."),
+    state: str | None = typer.Option(
+        None, "--state", help="Gentle AI state file path (default: ~/.gentle-ai/state.json)."
+    ),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the diff, write nothing."),
+    create: bool = typer.Option(False, "--create", help="Create the state file if missing."),
+    verify: bool = typer.Option(
+        False, "--verify", help="Re-read the state file and confirm the assignment round-trips."
+    ),
+) -> None:
+    """Set model_assignments["sdd-<phase>"] in the Gentle AI state file.
+
+    Preferred write surface for Gentle-AI-managed setups: gentle-ai sync
+    regenerates opencode agent configs FROM this file. Refuses malformed JSON,
+    unrecognized existing entries, and (without --create) missing files.
+    """
+    if ctx.invoked_subcommand is not None:
+        return  # `gentle-state rollback ...` — handled by its own command
+    required = (("--phase", phase), ("--model", model), ("--effort", effort))
+    missing = [name for name, value in required if value is None]
+    if missing:
+        err_console.print(f"[red]error: missing required option(s): {', '.join(missing)}[/red]")
+        raise typer.Exit(code=2)
+    name = phase.removeprefix("sdd-")
+    if name not in CANONICAL_PHASES:
+        err_console.print(
+            f"[red]error: unknown phase '{phase}' "
+            f"(expected one of: {', '.join(CANONICAL_PHASES)})[/red]"
+        )
+        raise typer.Exit(code=2)
+    if dry_run and verify:
+        err_console.print("[red]error: --verify requires a real write (not --dry-run)[/red]")
+        raise typer.Exit(code=2)
+    config, _ = _load_ctx(config_path, data_dir)
+    path = gs.resolve_state_path(state)
+    try:
+        result = gs.apply_assignment(
+            path, name, model, effort, create=create, dry_run=dry_run,
+            backup=config.integrate.backup,
+        )
+    except gs.AdapterError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    if result.diff:
+        console.print(result.diff, highlight=False)
+    if result.wrote:
+        console.print(f"[green]wrote {result.path}[/green]")
+        console.print(
+            f'{result.key_used}["{result.agent_key}"] = '
+            f'{{"provider_id": {json.dumps(result.provider_id)}, '
+            f'"model_id": {json.dumps(result.model_id)}, '
+            f'"effort": {json.dumps(result.effort)}}}'
+        )
+        if result.backup_path:
+            console.print(f"[dim]backup: {result.backup_path}[/dim]")
+        _print_gentle_state_followup()
+    else:
+        console.print("[dim]dry-run: nothing written[/dim]")
+    if verify:
+        ok, observed = gs.verify_assignment(path, name, model, effort)
+        if ok:
+            console.print(
+                f"[green]verify OK: {result.agent_key} -> "
+                f"{model}#{effort} round-trips in {path}[/green]"
+            )
+        else:
+            err_console.print(
+                f"[red]verify MISMATCH: expected {model}#{effort}, "
+                f"observed {observed!r}[/red]"
+            )
+            raise typer.Exit(code=1)
+
+
+@gentle_state_app.command("rollback")
+def integrate_gentle_state_rollback(
+    state: str | None = typer.Option(
+        None, "--state", help="Gentle AI state file path (default: ~/.gentle-ai/state.json)."
+    ),
+) -> None:
+    """Restore the latest router backup of the Gentle AI state file."""
+    path = gs.resolve_state_path(state)
+    restored = gs.rollback(path)
+    if restored is None:
+        err_console.print(f"[yellow]no backup found for {path}[/yellow]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]restored {path} from {restored}[/green]")
+
+
+@gentle_state_app.command("status")
+def integrate_gentle_state_status(
+    state: str | None = typer.Option(
+        None, "--state", help="Gentle AI state file path (default: ~/.gentle-ai/state.json)."
+    ),
+) -> None:
+    """Show current per-phase assignments from the Gentle AI state file."""
+    path = gs.resolve_state_path(state)
+    table = Table(title=f"gentle-state assignments ({path})")
+    table.add_column("agent")
+    table.add_column("provider_id")
+    table.add_column("model_id")
+    table.add_column("effort")
+    for ph in CANONICAL_PHASES:
+        entry = gs.read_assignment(path, ph)
+        if entry is None:
+            continue
+        table.add_row(
+            f"sdd-{ph}",
+            str(entry.get("provider_id") or "-"),
+            str(entry.get("model_id") or "-"),
+            str(entry.get("effort") or "-"),
+        )
+    console.print(table)
+
+
 @shim_app.command("ingest")
 def shim_ingest(
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
@@ -744,6 +948,19 @@ def build_dataset(
         None, "--pair-margin", help="Pairwise margin threshold (default 0.05)."
     ),
     max_pairs: int = typer.Option(50, "--max-pairs", help="Cap pairs per group."),
+    threshold_penalty: float = typer.Option(
+        0.0,
+        "--threshold-penalty",
+        help="Penalty applied to candidates below phase threshold_quality.",
+    ),
+    hard_threshold: bool = typer.Option(
+        False,
+        "--hard-threshold",
+        help="Zero out utility for candidates below phase threshold_quality.",
+    ),
+    cost_weight: float | None = typer.Option(
+        None, "--cost-weight", help="Weight of token cost penalty (default 0.5)."
+    ),
     phase: Annotated[
         list[str] | None,
         typer.Option("--phase", help="Phase to include (repeatable). Default: all."),
@@ -769,9 +986,13 @@ def build_dataset(
         "as_of": date.fromisoformat(as_of) if as_of else None,
         "max_pairs_per_group": max_pairs,
         "phases": phase or list(CANONICAL_PHASES),
+        "threshold_penalty": threshold_penalty,
+        "hard_threshold": hard_threshold,
     }
     if pair_margin is not None:
         builder_kwargs["pair_margin"] = pair_margin
+    if cost_weight is not None:
+        builder_kwargs["cost_weight"] = cost_weight
     try:
         builder = DatasetBuilderConfig(**builder_kwargs)
     except ValueError as exc:
@@ -785,7 +1006,7 @@ def build_dataset(
     try:
         with registry_db.Session(engine) as session:
             dataset = build_examples(session, config, builder)
-            out_dir = write_dataset(dataset, config.data_dir)
+            out_dir = write_dataset(dataset, config.data_dir, builder=builder)
     except DatasetBuildError as exc:
         err_console.print(f"[red]error: {exc}[/red]")
         raise typer.Exit(code=2) from exc
@@ -807,12 +1028,15 @@ def train(
     dataset_path: str = typer.Option(..., "--dataset", help="Dataset version directory."),
     objective: str | None = typer.Option(None, "--objective", help="pointwise | pairwise."),
     model_name: str | None = typer.Option(
-        None, "--model-name", help="HF model (default deberta-v3-base)."
+        None, "--model-name", help="HF encoder model (default answerdotai/ModernBERT-base)."
     ),
     output_dir: str | None = typer.Option(None, "--output-dir", help="Checkpoint root."),
     epochs: float | None = typer.Option(None, "--epochs"),
     batch_size: int | None = typer.Option(None, "--batch-size"),
     seed: int | None = typer.Option(None, "--seed"),
+    device: str | None = typer.Option(
+        None, "--device", help="auto | cpu | cuda (default: auto = cuda if available)."
+    ),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
 ) -> None:
@@ -828,6 +1052,7 @@ def train(
         ("epochs", epochs),
         ("batch_size", batch_size),
         ("seed", seed),
+        ("device", device),
     ):
         if value is not None:
             overrides[key] = value
@@ -863,6 +1088,12 @@ def evaluate(
         False, "--evaluate-baselines-only", help="No checkpoint; reference routers only."
     ),
     output: str | None = typer.Option(None, "--output", help="Write metrics.json here."),
+    batch_size: int | None = typer.Option(
+        None, "--batch-size", help="Ranker scoring batch size (default: evaluation.batch_size)."
+    ),
+    device: str | None = typer.Option(
+        None, "--device", help="auto | cpu | cuda (default: auto = cuda if available)."
+    ),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
 ) -> None:
@@ -885,6 +1116,8 @@ def evaluate(
                 session=session,
                 checkpoint=None if baselines_only else checkpoint,
                 output_path=output,
+                batch_size=batch_size,
+                device=device,
             )
     except (RuntimeError, ValueError) as exc:
         err_console.print(f"[red]error: {escape(str(exc))}[/red]")
@@ -1072,6 +1305,50 @@ def promote(
         f"[green]promoted {outcome.record['promoted_checkpoint']} "
         f"-> {outcome.record_path}[/green]"
     )
+
+
+def _format_size(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes / (1024 * 1024):.1f} MB"
+
+
+@app.command("export-onnx")
+@app.command("export_onnx", hidden=True)
+def export_onnx(
+    checkpoint: str = typer.Option(..., "--checkpoint", help="Path to checkpoint directory."),
+    output: str | None = typer.Option(None, "--output", help="Output directory for ONNX models."),
+    quantize: bool = typer.Option(
+        True, "--quantize/--no-quantize", help="Also produce INT8 quantized model."
+    ),
+) -> None:
+    """Export a trained ranker checkpoint to ONNX with optional INT8 dynamic quantization."""
+    from gentle_ai_model_router.training.onnx_export import export_onnx as do_export
+
+    try:
+        model_path, quant_path = do_export(
+            checkpoint=checkpoint,
+            output_dir=output,
+            quantize=quantize,
+        )
+    except Exception as exc:
+        err_console.print(f"[red]error: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    table = Table(title="ONNX Export Summary")
+    table.add_column("Artifact", style="bold")
+    table.add_column("Path")
+    table.add_column("Size", justify="right")
+
+    table.add_row("FP32 Model", str(model_path), _format_size(model_path.stat().st_size))
+    if quant_path is not None and quant_path.exists():
+        table.add_row(
+            "INT8 Quantized Model", str(quant_path), _format_size(quant_path.stat().st_size)
+        )
+
+    console.print(table)
 
 
 if __name__ == "__main__":

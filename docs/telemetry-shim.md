@@ -1,10 +1,10 @@
 # Telemetry Shim — router-owned instrumentation
 
-**Status**: live (Phase 4). Store, ingestion, the per-phase outcome rubric, and
-reward/bandit consumption are implemented; runtime hook plugins
-(OpenCode `message.updated`/`SubagentStop`, Pi `turn_context`) remain
-DESIGN/pending — executions currently arrive via `router shim ingest` /
-`router feedback`.
+**Status**: live (Phases 4 & 4a). Store, HTTP ingestion endpoints, the per-phase
+outcome rubric, reward/bandit consumption, and runtime hook plugins for OpenCode
+(`message.updated` / `SubagentStop`) and Pi (`turn_context` / review completion)
+are implemented. Executions can be streamed in live via `POST /shim/execution`
+or ingested via CLI (`router shim ingest` / `router feedback`).
 
 ## Why not Gentle AI's telemetry store
 
@@ -39,22 +39,33 @@ affect this store.
   `task_success` (0/1, NULL = unknown), `quality_score`, `escalation_count`,
   `repo_features` JSON, `router_version`, `decision_id` FK → `decisions`.
 
-## Ingestion today
+## Ingestion paths
 
-- API: `ShimStore.record_execution(session, payload)` (idempotent upsert on
-  `execution_id`), `record_decision(...)`, `tokens_per_success(session, phase)`.
-- CLI: `router shim ingest < executions.jsonl` — one JSON object per line;
+- **HTTP API**:
+  - `POST /shim/execution` — Ingests a single `ExecutionIn` record, idempotently
+    upserting into `telemetry.sqlite`. With `apply_rubric=True` (default), evaluates
+    missing `task_success` and `quality_score` through `score_execution(...)`.
+  - `POST /shim/executions` — Batch ingestion of execution records in a single transaction.
+  - `POST /shim/feedback` — Evaluates rubric unconditionally and overrides outcomes.
+- **CLI**: `router shim ingest < executions.jsonl` — one JSON object per line;
   malformed lines are skipped and counted, duplicates update.
+- **Python API**: `ShimStore.record_execution(session, payload)` (idempotent upsert on
+  `execution_id`), `record_decision(...)`, `tokens_per_success(session, phase)`.
 
-## Planned hook attachment (DESIGN/pending)
+## Runtime Hook Plugins (Phase 4a)
 
-- **OpenCode**: plugin subscribing to `message.updated` (per-response tokens,
-  latency) and `SubagentStop` (phase boundary, outcome). Emits the same
-  JSON-lines shape the shim ingests; transport later via local POST to the
-  Phase-2 FastAPI server or direct append.
-- **Pi**: `turn_context` hook for effort/model correlation on review roles.
-- No Gentle AI plugin is written by this phase; the shim only documents the
-  attachment points.
+Zero-dependency standard Node.js plugins streaming live execution events to the router shim:
+
+- **OpenCode**: `src/gentle_ai_model_router/plugins/opencode/router_telemetry.js` (+ `.d.ts`).
+  Subscribes to `message.updated` (incremental tokens, latency) and `SubagentStop` (phase
+  boundary, tools called, outcomes). Dispatches `ExecutionRecord` to `POST /shim/execution`
+  with 1500ms timeout and fallback spooling (`data/telemetry-spool.jsonl`).
+- **Pi**: `src/gentle_ai_model_router/plugins/pi/router_telemetry.js` (+ `.d.ts`).
+  Intercepts `turn_context` (model, thinking level) and review completion events (`approved`,
+  `correction_required`, `escalated`). Dispatches `ExecutionRecord` to `POST /shim/execution`
+  with fallback spooling.
+- **Plugin Installer CLI**: `router integrate plugins install [--opencode] [--pi] [--dry-run]`
+  and `router integrate plugins status`. Atomic writes with backup-first semantics.
 
 ## Privacy stance
 

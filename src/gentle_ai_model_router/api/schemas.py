@@ -7,6 +7,7 @@ order, and the policy underneath has no randomness — identical request body
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -73,3 +74,55 @@ class RouteResponse(BaseModel):
     estimated_cost: float
     policy_version: str
     registry_hash: str
+
+
+class ExecutionIn(BaseModel):
+    """Execution telemetry record submitted by runtime hooks or batch ingestion."""
+
+    execution_id: str = Field(min_length=1)
+    session_id: str | None = None
+    project_id: str | None = None
+    phase: str
+    task_type: str | None = None
+    model: str | None = None
+    deployment: str | None = None
+    effort: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+    total_tokens: int = 0
+    latency_ms: int | None = None
+    tool_calls: int = 0
+    tool_errors: int = 0
+    tests_passed: int | None = None
+    tests_failed: int | None = None
+    task_success: int | None = None
+    quality_score: float | None = None
+    escalation_count: int = 0
+    repo_features: dict[str, Any] | None = None
+    router_version: str | None = None
+    decision_id: str | None = None
+
+
+class ExecutionIngestResponse(BaseModel):
+    """Response returned upon ingesting a single execution record."""
+
+    status: str = "ok"
+    execution_id: str
+    created: bool
+    task_success: int | None = None
+    quality_score: float | None = None
+
+
+class BatchExecutionIngestResponse(BaseModel):
+    """Response returned upon ingesting multiple execution records in batch."""
+
+    status: str = "ok"
+    total: int
+    created: int
+    updated: int
+    execution_ids: list[str]
+

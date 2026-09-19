@@ -96,6 +96,11 @@ codex_app = typer.Typer(
     invoke_without_command=True,
 )
 integrate_app.add_typer(codex_app, name="codex")
+plugins_app = typer.Typer(
+    help="Manage runtime hook plugins for OpenCode and Pi.",
+    no_args_is_help=True,
+)
+integrate_app.add_typer(plugins_app, name="plugins")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -851,6 +856,87 @@ def integrate_status(
             "gentle-ai/sdd" if entry.get("managed") else "-",
         )
     console.print(table)
+
+
+@plugins_app.command("install")
+def plugins_install(
+    opencode: bool = typer.Option(False, "--opencode", help="Install OpenCode hook plugin."),
+    pi: bool = typer.Option(False, "--pi", help="Install Pi hook plugin."),
+    target_dir: str | None = typer.Option(
+        None, "--target-dir", help="Target installation directory override."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report planned changes without writing."
+    ),
+) -> None:
+    """Install runtime hook plugins for OpenCode and/or Pi."""
+    from gentle_ai_model_router.integration.plugin_installer import (
+        install_opencode_plugin,
+        install_pi_plugin,
+    )
+
+    install_all = not opencode and not pi
+    targets: list[str] = []
+    if opencode or install_all:
+        targets.append("opencode")
+    if pi or install_all:
+        targets.append("pi")
+
+    for target in targets:
+        if target == "opencode":
+            res = install_opencode_plugin(target_dir=target_dir, dry_run=dry_run)
+        else:
+            res = install_pi_plugin(target_dir=target_dir, dry_run=dry_run)
+
+        console.print(f"[bold]{res.plugin_name} plugin[/bold] -> {res.target_dir}")
+        for f in res.files:
+            prefix = "[yellow][dry-run][/yellow] " if dry_run else ""
+            if f.status == "unchanged":
+                console.print(f"  {prefix}[dim]{f.target_path.name}: unchanged[/dim]")
+            elif f.status in ("created", "dry-run"):
+                console.print(f"  {prefix}[green]{f.target_path.name}: installed[/green]")
+            elif f.status == "updated":
+                console.print(f"  {prefix}[green]{f.target_path.name}: updated[/green]")
+                if f.backup_path:
+                    console.print(f"  {prefix}[dim]backup: {f.backup_path}[/dim]")
+
+
+@plugins_app.command("status")
+def plugins_status(
+    opencode_dir: str | None = typer.Option(
+        None, "--opencode-dir", help="OpenCode plugin directory override."
+    ),
+    pi_dir: str | None = typer.Option(
+        None, "--pi-dir", help="Pi plugin directory override."
+    ),
+) -> None:
+    """Check installation and version status of runtime hook plugins."""
+    from gentle_ai_model_router.integration.plugin_installer import plugin_status
+
+    statuses = plugin_status(opencode_dir=opencode_dir, pi_dir=pi_dir)
+    table = Table(title="Runtime hook plugins status")
+    table.add_column("Plugin", style="bold")
+    table.add_column("Status")
+    table.add_column("Target Directory")
+    table.add_column("Files Present")
+    table.add_column("Backups")
+    table.add_column("Version")
+
+    for _, info in statuses.items():
+        status_str = (
+            "[green]installed[/green]" if info.installed else "[yellow]not installed[/yellow]"
+        )
+        table.add_row(
+            info.name,
+            status_str,
+            str(info.target_dir),
+            ", ".join(info.files_present) if info.files_present else "[dim]none[/dim]",
+            str(info.backup_count),
+            info.router_version or "[dim]-[/dim]",
+        )
+
+    console.print(table)
+
 
 
 def _print_gentle_state_followup() -> None:

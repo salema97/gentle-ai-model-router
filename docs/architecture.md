@@ -1,20 +1,14 @@
 # Target Architecture — Gentle AI Model Router
 
-**Status**: Phases 0–3a IMPLEMENTED (collectors, registry, dataset builder,
+**Status**: Phases 0–5 IMPLEMENTED (collectors, registry, dataset builder,
 deterministic baseline policy + escalation ladder, ModernBERT ranker
-training/eval harness `[train]`, telemetry shim, OpenCode adapter, FastAPI
-`/route` server + policy inspection CLI). The component table below marks
-each module ✅ implemented / ⏳ pending; the original design text is kept
-for the pending parts. Claims about Gentle AI internals are backed by
+training/eval harness `[train]`, ONNX export + quantization, telemetry shim
+with HTTP ingestion endpoints `/shim/execution` and `/shim/feedback`,
+runtime hook plugins for OpenCode and Pi, plugin installer CLI, OpenCode/Pi/Codex
+adapters, bandit learning loop, threshold tuning, and learned ranker promotion).
+Claims about Gentle AI internals are backed by
 `docs/gentle-ai-integration-research.md` (evidence: file + line in the
-reference clone). Items marked **[PENDING VERIFICATION]** depend on external
-systems and must be re-validated before Phase 1 implementation.
-
-**Pending (explicitly not implemented)**: the bandit/policy learning loop on
-telemetry (Phase 4), Pi + Codex adapters, the learned-policy promotion
-workflow (a trained ModernBERT checkpoint replacing the baseline only after it
-beats it offline), and real hook attachment into Gentle AI runtimes (today
-only the OpenCode write adapter and the JSONL ingest shim surface exist).
+reference clone).
 
 ## Objective
 
@@ -119,10 +113,10 @@ regress success rate below a configurable threshold).
 | `registry/` | ✅ | Schema + CRUD for models, deployments, capabilities, prices, scores, availability | `registry/models.py`, `registry/db.py` (idempotent upserts), `registry/normalize.py`; SQLite fallback via env, Postgres-compatible |
 | `registry/fingerprint.py` | ✅ | Cheap deterministic registry fingerprint (`count:max_id` per table, sha256) for API determinism + policy-cache invalidation | `registry_fingerprint(engine)` |
 | `dataset/` | ✅ | Join priors into training rows (labels = bootstrap priors); temporal anti-leakage splits; dataset versioning | `dataset/builder.py`, versioned exports under `data/datasets/` |
-| `training/` | ✅ (baseline) / ⏳ (learned promotion) | ModernBERT phase/context ranker training + offline evaluation; **learned-policy promotion workflow pending** — a checkpoint only replaces the baseline after beating it offline | `training/train.py`, `training/evaluate.py` (`[train]` extra) |
+| `training/` | ✅ | ModernBERT phase/context ranker training + offline evaluation + ONNX export with quantization + promotion workflow | `training/train.py`, `training/evaluate.py`, `training/onnx_export.py`, `training/promote.py` |
 | `router/` | ✅ | Deterministic prior-weighted policy: min-sufficient-effort selection, per-phase quality floors, hard filters, escalation ladder; full ranking exposed for inspection | `router/policy.py` (`rank_candidates`/`select_candidate`), `router/decision.py`, `router/escalation.py`, `router/config.py` |
-| `api/` | ✅ | FastAPI `/route` server (per-request decisions, `registry_hash`/`policy_version` provenance, shim decision logging, 422/503 fail-closed semantics) + cached `/policy` + `/health` | `api/server.py`, `api/schemas.py`; `router serve` launches uvicorn on localhost |
-| `integration/` | ✅ OpenCode + telemetry shim / ⏳ Pi, Codex, real hook attachment | Gentle AI runtime adapters; **real hook attachment into runtimes is pending** (today: write adapter for opencode.json + JSONL ingest shim) | `integration/opencode_adapter.py`, `integration/telemetry_shim.py` |
+| `api/` | ✅ | FastAPI `/route` server (per-request decisions, provenance, shim decision logging, 422/503 semantics) + telemetry ingestion `/shim/execution` and `/shim/feedback` + cached `/policy` + `/health` | `api/server.py`, `api/schemas.py`; `router serve` launches uvicorn on localhost |
+| `integration/` | ✅ | Gentle AI runtime adapters (OpenCode, Pi, Codex) + telemetry shim + runtime hook plugins (OpenCode, Pi) and plugin installer | `integration/opencode_adapter.py`, `integration/pi_adapter.py`, `integration/codex_adapter.py`, `integration/telemetry_shim.py`, `integration/plugin_installer.py`, `plugins/` |
 | `cli/` | ✅ | `router collect|normalize|route|policy|explain|export|serve|build-dataset|train|evaluate|integrate|shim` | `cli/main.py` (Typer) |
 | `tests/` | ✅ | Unit + CLI + API contract tests (99+ before Phase 3a; 119 + Phase 3a suite after) | `tests/` |
 

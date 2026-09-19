@@ -65,15 +65,15 @@ Without automated hook instrumentation:
 
 ## Tasks
 
-- [ ] **H1** — API Ingestion Endpoints (`POST /shim/execution` and `POST /shim/feedback`
+- [x] **H1** — API Ingestion Endpoints (`POST /shim/execution` and `POST /shim/feedback`
   in `api/server.py` + schemas in `api/schemas.py`).
-- [ ] **H2** — OpenCode Telemetry Plugin (`plugins/opencode/router_telemetry.js` + `.ts`).
-- [ ] **H3** — Pi Telemetry Plugin (`plugins/pi/router_telemetry.js` + `.ts`).
-- [ ] **H4** — CLI Plugin Installer (`router integrate plugins install/status` in
+- [x] **H2** — OpenCode Telemetry Plugin (`plugins/opencode/router_telemetry.js` + `.ts`).
+- [x] **H3** — Pi Telemetry Plugin (`plugins/pi/router_telemetry.js` + `.ts`).
+- [x] **H4** — CLI Plugin Installer (`router integrate plugins install/status` in
   `cli/main.py` and `integration/plugin_installer.py`).
-- [ ] **H5** — Contract & Integration Tests (`tests/test_api_telemetry.py`,
+- [x] **H5** — Contract & Integration Tests (`tests/test_api_telemetry.py`,
   `tests/test_runtime_hook_contracts.py`, `tests/test_plugin_installer.py`).
-- [ ] **H6** — Documentation Sync (`README.md`, `docs/architecture.md`,
+- [x] **H6** — Documentation Sync (`README.md`, `docs/architecture.md`,
   `docs/telemetry-shim.md`, `docs/runbook.md`).
 
 ## Acceptance criteria

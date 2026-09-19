@@ -107,14 +107,65 @@ router integrate pi status            # gentle-pi models.json view
 router integrate codex status         # codex state-file assignments view
 ```
 
-## 5. Observe: telemetry + cost-per-success
+## 5. Observe: telemetry + runtime hooks + cost-per-success
+
+### 5a. Installing runtime hook plugins (OpenCode + Pi)
+
+The router provides zero-dependency native JavaScript runtime hook plugins that stream
+execution telemetry directly into the router's telemetry shim store:
 
 ```bash
-# ingest execution JSON-lines (from the shim hook) into the telemetry store
-router shim ingest < executions.jsonl
+# Inspect plugin installation status
+router integrate plugins status
+
+# Dry-run inspection of planned changes
+router integrate plugins install --dry-run
+
+# Install both OpenCode and Pi plugins (with backup-first semantics)
+router integrate plugins install
+
+# Or install selectively for OpenCode or Pi only
+router integrate plugins install --opencode
+router integrate plugins install --pi --target-dir ~/.pi/plugins
+```
+
+Once installed:
+- **OpenCode**: hooks into `message.updated` and `SubagentStop`, capturing tokens, latency,
+  tool calls, tool errors, test results, and phase outcomes.
+- **Pi**: hooks into `turn_context` and review completion events, capturing model assignments,
+  thinking effort, tokens, and review decisions (`approved`, `correction_required`, `escalated`).
+- **Resilience**: dispatches asynchronously to `http://127.0.0.1:8377/shim/execution` (1500ms timeout).
+  If the router server is offline, executions automatically append to local spool file (`data/telemetry-spool.jsonl`).
+
+### 5b. Telemetry Ingestion HTTP API
+
+The FastAPI server (`router serve`) exposes live telemetry ingestion endpoints:
+
+```bash
+# Ingest single execution (rubric auto-scores missing task_success/quality_score)
+curl -X POST http://127.0.0.1:8377/shim/execution \
+  -H "Content-Type: application/json" \
+  -d '{"execution_id": "exec-1", "phase": "apply", "model": "anthropic/claude-3-5-sonnet", "total_tokens": 1200, "tests_passed": 10, "tests_failed": 0}'
+
+# Batch ingestion of multiple executions
+curl -X POST http://127.0.0.1:8377/shim/executions \
+  -H "Content-Type: application/json" \
+  -d '[{"execution_id": "exec-2", "phase": "explore", "total_tokens": 400}]'
+
+# Ingest and force rubric outcome re-evaluation
+curl -X POST http://127.0.0.1:8377/shim/feedback \
+  -H "Content-Type: application/json" \
+  -d '{"execution_id": "exec-3", "phase": "apply", "tests_passed": 5, "tests_failed": 0}'
+```
+
+### 5c. Offline Ingestion & Bandit Feedback Loop
+
+```bash
+# ingest execution JSON-lines (from spool or scripts) into the telemetry store
+router shim ingest < data/telemetry-spool.jsonl
 
 # or ingest AND score outcomes in one pass (rubric -> task_success/quality_score)
-router feedback < executions.jsonl
+router feedback < data/telemetry-spool.jsonl
 
 # refresh rewards from the store and print the bandit version
 router bandit update
@@ -244,4 +295,6 @@ router integrate gentle-state rollback            # or: router integrate rollbac
 | `~/.config/opencode/opencode.json` (unmanaged blocks only) | `router integrate opencode` | OpenCode session start |
 | `~/.pi/gentle-ai/models.json` (or `GENTLE_PI_CONFIG_HOME`) | `router integrate pi` | gentle-pi review routing |
 | `~/.gentle-ai/state.json` (`CodexModelAssignments`, `CodexPhaseModelAssignments`) | `router integrate codex` | `gentle-ai sync` → Codex TOML profiles |
+| `~/.config/opencode/plugins/router_telemetry.js` | `router integrate plugins install --opencode` | OpenCode runtime hooks |
+| `~/.pi/plugins/router_telemetry.js` | `router integrate plugins install --pi` | gentle-pi review turn hooks |
 | `__managed_by: gentle-ai/sdd` blocks | **nobody external — `gentle-ai sync` only** | OpenCode session start |

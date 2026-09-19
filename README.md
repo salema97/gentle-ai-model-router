@@ -40,7 +40,7 @@ Gentle AI integration evidence: `docs/gentle-ai-integration-research.md`.
 | 3 | Telemetry collector shim | ✅ done |
 | 3a | FastAPI `/route` server + policy inspection CLI (`policy`/`explain`/`export`) | ✅ done |
 | 4 | Bandit/policy loop on telemetry (outcome rubric → rewards → constrained UCB over threshold-meeting arms; cold start byte-identical to the deterministic policy); Pi + Codex adapters (state-file route) | ✅ done |
-| 4a | Runtime hook plugins feeding the shim (OpenCode `message.updated`/`SubagentStop`, Pi `turn_context`) | pending |
+| 4a | Runtime hook plugins feeding the shim (OpenCode `message.updated`/`SubagentStop`, Pi `turn_context`) | ✅ done |
 | 5 | ModernBERT phase/context ranker retrained on telemetry; threshold tuning; learned-policy promotion workflow | ✅ done |
 
 ## Quickstart

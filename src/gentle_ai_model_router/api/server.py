@@ -17,10 +17,17 @@ from sqlalchemy.engine import Engine
 
 from gentle_ai_model_router.api.schemas import (
     AlternativeOut,
+    BatchExecutionIngestResponse,
+    ExecutionIn,
+    ExecutionIngestResponse,
     RouteRequest,
     RouteResponse,
 )
 from gentle_ai_model_router.integration import telemetry_shim
+from gentle_ai_model_router.integration.outcome import (
+    OutcomeRubricError,
+    score_execution,
+)
 from gentle_ai_model_router.registry import db as registry_db
 from gentle_ai_model_router.registry.fingerprint import registry_fingerprint
 from gentle_ai_model_router.router.bandit import (
@@ -309,5 +316,151 @@ def create_app(
             "policy_version": full_policy_version(config),
             "phases": policy_cache[reg_hash],
         }
+
+    @app.post("/shim/execution", response_model=ExecutionIngestResponse)
+    def ingest_execution(
+        payload: ExecutionIn,
+        apply_rubric: bool = True,
+    ) -> ExecutionIngestResponse:
+        """Ingest a single runtime execution record into the telemetry shim store."""
+        if shim_store is None:
+            raise HTTPException(
+                status_code=503, detail="telemetry shim store is not configured"
+            )
+        data = payload.model_dump(exclude_unset=False)
+        try:
+            data["phase"] = normalize_phase(payload.phase)
+        except PolicyError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        if apply_rubric and (payload.task_success is None or payload.quality_score is None):
+            try:
+                lat = float(payload.latency_ms) if payload.latency_ms is not None else None
+                outcome = score_execution(
+                    data["phase"],
+                    tests_passed=payload.tests_passed,
+                    tests_failed=payload.tests_failed,
+                    tool_errors=payload.tool_errors,
+                    escalation_count=payload.escalation_count,
+                    latency_ms=lat,
+                    task_success=payload.task_success,
+                    quality_score=payload.quality_score,
+                )
+                data["task_success"] = outcome.task_success
+                data["quality_score"] = outcome.quality_score
+            except (OutcomeRubricError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        with shim_store.session() as session:
+            record, created = shim_store.record_execution(session, data)
+            exec_id = record.execution_id
+            t_succ = record.task_success
+            q_score = record.quality_score
+
+        return ExecutionIngestResponse(
+            status="ok",
+            execution_id=exec_id,
+            created=created,
+            task_success=t_succ,
+            quality_score=q_score,
+        )
+
+    @app.post("/shim/executions", response_model=BatchExecutionIngestResponse)
+    def ingest_executions_batch(
+        payloads: list[ExecutionIn],
+        apply_rubric: bool = True,
+    ) -> BatchExecutionIngestResponse:
+        """Ingest a batch of runtime execution records in a single transaction."""
+        if shim_store is None:
+            raise HTTPException(
+                status_code=503, detail="telemetry shim store is not configured"
+            )
+        created_count = 0
+        updated_count = 0
+        execution_ids: list[str] = []
+        with shim_store.session() as session:
+            for item in payloads:
+                data = item.model_dump(exclude_unset=False)
+                try:
+                    data["phase"] = normalize_phase(item.phase)
+                except PolicyError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+                if apply_rubric and (item.task_success is None or item.quality_score is None):
+                    try:
+                        lat = float(item.latency_ms) if item.latency_ms is not None else None
+                        outcome = score_execution(
+                            data["phase"],
+                            tests_passed=item.tests_passed,
+                            tests_failed=item.tests_failed,
+                            tool_errors=item.tool_errors,
+                            escalation_count=item.escalation_count,
+                            latency_ms=lat,
+                            task_success=item.task_success,
+                            quality_score=item.quality_score,
+                        )
+                        data["task_success"] = outcome.task_success
+                        data["quality_score"] = outcome.quality_score
+                    except (OutcomeRubricError, ValueError) as exc:
+                        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+                record, created = shim_store.record_execution(session, data)
+                if created:
+                    created_count += 1
+                else:
+                    updated_count += 1
+                execution_ids.append(record.execution_id)
+
+        return BatchExecutionIngestResponse(
+            status="ok",
+            total=len(payloads),
+            created=created_count,
+            updated=updated_count,
+            execution_ids=execution_ids,
+        )
+
+    @app.post("/shim/feedback", response_model=ExecutionIngestResponse)
+    def ingest_feedback(
+        payload: ExecutionIn,
+    ) -> ExecutionIngestResponse:
+        """Ingest execution telemetry and re-evaluate task_success/quality_score via rubric."""
+        if shim_store is None:
+            raise HTTPException(
+                status_code=503, detail="telemetry shim store is not configured"
+            )
+        data = payload.model_dump(exclude_unset=False)
+        try:
+            data["phase"] = normalize_phase(payload.phase)
+        except PolicyError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            lat = float(payload.latency_ms) if payload.latency_ms is not None else None
+            outcome = score_execution(
+                data["phase"],
+                tests_passed=payload.tests_passed,
+                tests_failed=payload.tests_failed,
+                tool_errors=payload.tool_errors,
+                escalation_count=payload.escalation_count,
+                latency_ms=lat,
+            )
+            data["task_success"] = outcome.task_success
+            data["quality_score"] = outcome.quality_score
+        except (OutcomeRubricError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        with shim_store.session() as session:
+            record, created = shim_store.record_execution(session, data)
+            exec_id = record.execution_id
+            t_succ = record.task_success
+            q_score = record.quality_score
+
+        return ExecutionIngestResponse(
+            status="ok",
+            execution_id=exec_id,
+            created=created,
+            task_success=t_succ,
+            quality_score=q_score,
+        )
 
     return app

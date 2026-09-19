@@ -189,7 +189,9 @@ class ShimStore:
             fields[key] = int(value) if isinstance(value, (int, float)) else 0
         for key in ("started_at", "finished_at"):
             value = payload.get(key)
-            if isinstance(value, str):
+            if isinstance(value, datetime):
+                fields[key] = value
+            elif isinstance(value, str):
                 try:
                     fields[key] = datetime.fromisoformat(value)
                 except ValueError:

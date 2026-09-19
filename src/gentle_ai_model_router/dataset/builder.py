@@ -573,25 +573,41 @@ def _extract_ground_truth_samples(source_name: str, payload: Any) -> list[dict[s
             prompt = str(item.get("prompt") or item.get("query") or "")
             task_name = str(item.get("task_name") or item.get("task") or "routerbench")
             phase = str(item.get("mapped_phase") or "apply")
-            model = str(item.get("model_name") or item.get("model") or "")
-            quality = float(
-                item.get("correctness")
-                if item.get("correctness") is not None
-                else item.get("score", 0.5)
-            )
+            models_name = item.get("models_name")
+            models_perf = item.get("models_performance")
             cost = float(item.get("cost") or 0.0)
             in_tokens = int(item.get("input_tokens") or item.get("prompt_tokens") or 1000)
-            samples.append({
-                "task_name": task_name,
-                "prompt": prompt,
-                "model": model,
-                "model_name": model,
-                "quality": quality,
-                "cost": cost,
-                "input_tokens": in_tokens,
-                "phase": phase,
-                "mapped_phase": phase,
-            })
+            if isinstance(models_name, list) and isinstance(models_perf, list) and models_name:
+                for m_name, score in zip(models_name, models_perf, strict=False):
+                    samples.append({
+                        "task_name": task_name,
+                        "prompt": prompt,
+                        "model": str(m_name),
+                        "model_name": str(m_name),
+                        "quality": float(score),
+                        "cost": cost,
+                        "input_tokens": in_tokens,
+                        "phase": phase,
+                        "mapped_phase": phase,
+                    })
+            else:
+                model = str(item.get("model_name") or item.get("model") or "")
+                quality = float(
+                    item.get("correctness")
+                    if item.get("correctness") is not None
+                    else item.get("score", 0.5)
+                )
+                samples.append({
+                    "task_name": task_name,
+                    "prompt": prompt,
+                    "model": model,
+                    "model_name": model,
+                    "quality": quality,
+                    "cost": cost,
+                    "input_tokens": in_tokens,
+                    "phase": phase,
+                    "mapped_phase": phase,
+                })
     return samples
 
 
@@ -604,13 +620,21 @@ def _match_candidate_model(
     short = canonical.split("/")[-1] if "/" in canonical else canonical
     candidates = {canonical, name, short}
 
+    def _is_match(raw_target: str) -> bool:
+        t = str(raw_target).strip().lower()
+        t_short = t.split("/")[-1] if "/" in t else t
+        if t in candidates or t_short in candidates:
+            return True
+        for c in candidates:
+            if c and len(c) >= 4 and (c in t or t in c or c in t_short or t_short in c):
+                return True
+        return False
+
     # Check task_group["models"] dictionary if grouped
     models_dict = task_group.get("models")
     if isinstance(models_dict, dict):
         for raw_m, eval_data in models_dict.items():
-            m_str = str(raw_m).strip().lower()
-            m_short = m_str.split("/")[-1] if "/" in m_str else m_str
-            if m_str in candidates or m_short in candidates:
+            if _is_match(raw_m):
                 raw_q = eval_data.get("quality")
                 if raw_q is None:
                     raw_q = eval_data.get("performance")
@@ -631,27 +655,24 @@ def _match_candidate_model(
 
     # Check task_group.get("model") or task_group.get("model_name")
     raw_m = task_group.get("model") or task_group.get("model_name")
-    if raw_m:
-        m_str = str(raw_m).strip().lower()
-        m_short = m_str.split("/")[-1] if "/" in m_str else m_str
-        if m_str in candidates or m_short in candidates:
-            raw_q = task_group.get("quality")
-            if raw_q is None:
-                raw_q = task_group.get("performance")
-            if raw_q is None:
-                raw_q = task_group.get("score")
-            if raw_q is None:
-                raw_q = 0.5
-            try:
-                q = float(raw_q)
-            except (ValueError, TypeError):
-                q = 0.5
-            c = task_group.get("cost")
-            try:
-                cost_val = float(c) if c is not None else None
-            except (ValueError, TypeError):
-                cost_val = None
-            return True, q, cost_val
+    if raw_m and _is_match(raw_m):
+        raw_q = task_group.get("quality")
+        if raw_q is None:
+            raw_q = task_group.get("performance")
+        if raw_q is None:
+            raw_q = task_group.get("score")
+        if raw_q is None:
+            raw_q = 0.5
+        try:
+            q = float(raw_q)
+        except (ValueError, TypeError):
+            q = 0.5
+        c = task_group.get("cost")
+        try:
+            cost_val = float(c) if c is not None else None
+        except (ValueError, TypeError):
+            cost_val = None
+        return True, q, cost_val
 
     return False, 0.5, None
 
@@ -1005,14 +1026,12 @@ def build_examples(
                         matched, match_q, match_cost = _match_candidate_model(
                             model, task_group
                         )
-                        if matched:
-                            quality = match_q
-                            if match_cost is not None and match_cost > 0.0:
-                                est_cost = match_cost
-                            label_provenance = PROVENANCE_EMPIRICAL
-                        else:
-                            quality = effort_quality(priors[model.id], variant.effort, policy)
-                            label_provenance = PROVENANCE_BOOTSTRAP
+                        if not matched:
+                            continue
+                        quality = match_q
+                        if match_cost is not None and match_cost > 0.0:
+                            est_cost = match_cost
+                        label_provenance = PROVENANCE_EMPIRICAL
 
                         dates = model_source_dates[model.id]
                         example_date = max(dates) if dates else newest_snapshot_date
@@ -1138,14 +1157,12 @@ def build_examples(
                         matched, match_q, match_cost = _match_candidate_model(
                             model, task_group
                         )
-                        if matched:
-                            quality = match_q
-                            if match_cost is not None and match_cost > 0.0:
-                                est_cost = match_cost
-                            label_provenance = PROVENANCE_GROUND_TRUTH
-                        else:
-                            quality = effort_quality(priors[model.id], variant.effort, policy)
-                            label_provenance = PROVENANCE_BOOTSTRAP
+                        if not matched:
+                            continue
+                        quality = match_q
+                        if match_cost is not None and match_cost > 0.0:
+                            est_cost = match_cost
+                        label_provenance = PROVENANCE_GROUND_TRUTH
 
                         dates = model_source_dates[model.id]
                         example_date = max(dates) if dates else newest_snapshot_date
@@ -1420,14 +1437,17 @@ def build_examples(
     for task_id in sorted(by_group):
         if task_id.startswith("task-tel-"):
             continue  # telemetry rows are pointwise labels; pairs stay prior-derived
-        group = sorted(by_group[task_id], key=lambda e: e.candidate.key)
+        group = sorted(by_group[task_id], key=lambda e: (-e.label_utility, e.candidate.key))
         phase = group[0].phase
         pair_count = 0
         for i in range(len(group)):
-            for j in range(i + 1, len(group)):
+            if pair_count >= builder.max_pairs_per_group:
+                break
+            a = group[i]
+            for j in range(i + 1, min(len(group), i + 50)):
                 if pair_count >= builder.max_pairs_per_group:
                     break
-                a, b = group[i], group[j]
+                b = group[j]
                 margin = a.label_utility - b.label_utility
                 if margin < builder.pair_margin:
                     continue
@@ -1522,8 +1542,22 @@ def write_dataset(
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        pa_table = pa.Table.from_pylist([_example_to_row(e) for e in dataset.examples])
-        pq.write_table(pa_table, out_dir / "examples.parquet")
+        batch_size = 10000
+        if dataset.examples:
+            first_chunk = [_example_to_row(e) for e in dataset.examples[:batch_size]]
+            tbl = pa.Table.from_pylist(first_chunk)
+            schema = tbl.schema
+            with pq.ParquetWriter(out_dir / "examples.parquet", schema=schema) as writer:
+                writer.write_table(tbl)
+                for start in range(batch_size, len(dataset.examples), batch_size):
+                    chunk = [
+                        _example_to_row(e)
+                        for e in dataset.examples[start : start + batch_size]
+                    ]
+                    writer.write_table(pa.Table.from_pylist(chunk, schema=schema))
+        else:
+            pq.write_table(pa.Table.from_pylist([]), out_dir / "examples.parquet")
+
         pq.write_table(
             pa.Table.from_pylist([_pair_to_row(p) for p in dataset.pairs]),
             out_dir / "pairs.parquet",

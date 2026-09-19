@@ -123,7 +123,8 @@ def extract_routerbench_sample(row: dict[str, Any]) -> dict[str, Any] | None:
         or "routerbench"
     )
     model = str(row.get("model_name") or row.get("model") or "")
-    if not prompt and not model:
+    models_name = row.get("models_name")
+    if not prompt and not model and not models_name:
         return None
 
     cost = _safe_float(row.get("cost") or row.get("model_cost") or row.get("eval_cost"))
@@ -133,29 +134,27 @@ def extract_routerbench_sample(row: dict[str, Any]) -> dict[str, Any] | None:
         or row.get("time")
         or row.get("duration")
     )
-
-    raw_correct = (
-        row.get("correctness")
-        if row.get("correctness") is not None
-        else row.get("eval_score")
-        if row.get("eval_score") is not None
-        else row.get("score")
-        if row.get("score") is not None
-        else row.get("win")
-        if row.get("win") is not None
-        else row.get("label")
+    correctness = (
+        1.0
+        if row.get("win") is True or row.get("correct") is True or row.get("success") is True
+        else 0.0
+        if row.get("win") is False or row.get("correct") is False or row.get("success") is False
+        else _safe_float(
+            row.get("correctness")
+            if row.get("correctness") is not None
+            else row.get("score", 0.5),
+            default=0.5,
+        )
     )
-    if isinstance(raw_correct, bool):
-        correctness = 1.0 if raw_correct else 0.0
-    else:
-        correctness = _safe_float(raw_correct, default=0.5)
+    input_tokens = _safe_int(
+        row.get("input_tokens") or row.get("prompt_tokens") or row.get("tokens_input")
+    )
+    output_tokens = _safe_int(
+        row.get("output_tokens") or row.get("completion_tokens") or row.get("tokens_output")
+    )
+    mapped_phase = map_routerbench_task_to_phase(task_name)
 
-    input_tokens = _safe_int(row.get("input_tokens") or row.get("prompt_tokens") or 0)
-    output_tokens = _safe_int(row.get("output_tokens") or row.get("completion_tokens") or 0)
-
-    mapped_phase = str(row.get("mapped_phase") or map_routerbench_task_to_phase(task_name))
-
-    return {
+    sample: dict[str, Any] = {
         "prompt": prompt,
         "task_name": task_name,
         "model_name": model,
@@ -166,6 +165,12 @@ def extract_routerbench_sample(row: dict[str, Any]) -> dict[str, Any] | None:
         "output_tokens": output_tokens,
         "mapped_phase": mapped_phase,
     }
+    if isinstance(models_name, list):
+        sample["models_name"] = [str(m) for m in models_name]
+        sample["models_performance"] = [
+            _safe_float(p, 0.5) for p in (row.get("models_performance") or [])
+        ]
+    return sample
 
 
 class RouterBenchCollectionError(Exception):

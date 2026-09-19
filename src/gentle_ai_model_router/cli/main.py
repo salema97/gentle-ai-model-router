@@ -409,6 +409,65 @@ def _print_policy_table(ranking: CandidateRanking) -> None:
 
 
 @app.command()
+def calibrate_thresholds(
+    phase: str | None = typer.Option(
+        None, "--phase", help="One SDD phase (default: all 11 canonical phases)."
+    ),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Suggest per-phase threshold_quality values from registry priors (read-only).
+
+    Decision support ONLY: this command never modifies router.yaml. For each
+    phase it shows the current threshold, the p25/p50/p75 of the achievable
+    quality distribution (computed with the policy's own effort_quality +
+    benchmark priors), the fraction of candidates whose best effort meets the
+    current threshold, and a suggested threshold = min(max(current, p50), p90).
+    Priors are bootstrap-quality (external benchmark scores, not measured task
+    success) — treat the suggestion as a starting point, not ground truth.
+    Always exits 0.
+    """
+    from gentle_ai_model_router.router.calibrate import calibrate_thresholds as calibrate
+
+    config, _ = _load_ctx(config_path, data_dir)
+    engine = _open_registry(config)
+    try:
+        with registry_db.Session(engine) as session:
+            rows = calibrate(session, config, phase)
+    except PolicyError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        return  # informational command: always exit 0
+
+    table = Table(title="threshold calibration (read-only; nothing written)")
+    for column in (
+        "phase",
+        "current",
+        "p25",
+        "p50",
+        "p75",
+        "meet %",
+        "suggested",
+    ):
+        numeric = column not in {"phase"}
+        table.add_column(column, justify="right" if numeric else "left")
+    for row in rows:
+        table.add_row(
+            row.phase,
+            f"{row.threshold:.3f}",
+            f"{row.p25:.3f}",
+            f"{row.p50:.3f}",
+            f"{row.p75:.3f}",
+            f"{row.fraction_meeting:.1%}",
+            f"{row.suggested:.3f}",
+        )
+    console.print(table)
+    err_console.print(
+        "[yellow]suggested = min(max(current, p50), p90); priors are bootstrap-quality —[/yellow]"
+    )
+    err_console.print("[yellow]verify against real telemetry before adopting.[/yellow]")
+
+
+@app.command()
 def explain(
     phase: str = typer.Option(..., "--phase", help="SDD phase to explain."),
     task: str | None = typer.Option(
@@ -854,6 +913,11 @@ def evaluate(
                 f"{metrics['routing_regret']:.4f}",
             )
         console.print(table)
+    chooser_errors = results.get("chooser_errors") or []
+    if chooser_errors:
+        err_console.print(
+            f"[yellow]{len(chooser_errors)} chooser error(s): see metrics json[/yellow]"
+        )
     err_console.print(
         "[yellow]Caveat: labels are bootstrap priors — compare routers relative to"
         " each other only.[/yellow]"

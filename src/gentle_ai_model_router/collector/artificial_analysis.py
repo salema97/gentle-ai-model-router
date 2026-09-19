@@ -238,10 +238,28 @@ class ArtificialAnalysisCollector:
 
         path, headers = self._endpoint()
         started = datetime.now(tz=UTC)
+        fallback: str | None = None
         try:
             payload = _request_json(self._client, path, headers)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 401 and not self.api_key:
+            if exc.response.status_code == 403 and self.api_key:
+                # Key without Pro access (e.g. Free-tier key): fall back to the
+                # free endpoint, still authenticated — the free endpoint
+                # rejects unauthenticated calls (verified live: 401 without
+                # key). /language/models returns 403 "requires a Pro
+                # subscription" for non-Pro keys.
+                logger.warning(
+                    "collect source=%s authenticated endpoint 403 (no Pro access) "
+                    "— falling back to free endpoint",
+                    SOURCE_NAME,
+                )
+                path, headers = self.config.models_free_path, {"x-api-key": self.api_key}
+                try:
+                    payload = _request_json(self._client, path, headers)
+                except httpx.HTTPStatusError:
+                    raise exc from None  # surface the original authenticated-endpoint error
+                fallback = "free_endpoint_after_403"
+            elif exc.response.status_code == 401 and not self.api_key:
                 # Free endpoint rejected us: record the error, degrade gracefully.
                 logger.warning(
                     "collect source=%s free_endpoint_401 — recording error and continuing",
@@ -261,7 +279,8 @@ class ArtificialAnalysisCollector:
                     fetched_at=now,
                 )
                 return record
-            raise
+            else:
+                raise
 
         duration = (datetime.now(tz=UTC) - started).total_seconds()
         self.quota.consume(1, now)
@@ -274,6 +293,7 @@ class ArtificialAnalysisCollector:
                 "record_count": record_count,
                 "errors": [],
                 "duration_seconds": round(duration, 3),
+                "fallback": fallback,
             },
             fetched_at=now,
         )

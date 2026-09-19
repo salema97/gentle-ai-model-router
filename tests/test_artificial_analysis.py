@@ -157,6 +157,54 @@ def test_fresh_cache_short_circuits(store: SnapshotStore, data_dir: Path, aa_pay
     assert record.record_count == 2
 
 
+@respx.mock
+def test_403_falls_back_to_free_endpoint(store: SnapshotStore, data_dir: Path, aa_payload) -> None:
+    """Free-tier key (no Pro): 403 on /language/models -> free endpoint works."""
+    auth_route = respx.get(f"{BASE}/api/v2/language/models").mock(
+        return_value=httpx.Response(403, json={"error": "requires a Pro subscription"})
+    )
+    free_route = respx.get(f"{BASE}/api/v2/language/models/free").mock(
+        return_value=httpx.Response(200, json=aa_payload)
+    )
+    collector = make_collector(
+        store, data_dir, api_key="free-tier-key", client=httpx.Client(base_url=BASE, timeout=5)
+    )
+    record = collector.collect(now=NOW)
+
+    assert auth_route.call_count == 1
+    assert free_route.call_count == 1
+    assert record.record_count == 2
+    assert record.errors == []
+    # Quota consumed ONCE for the whole collect, despite two HTTP requests.
+    assert collector.quota.remaining(NOW) == 99
+    # The snapshot meta records the fallback for downstream auditability.
+    import json
+
+    doc = json.loads(record.path.read_text(encoding="utf-8"))
+    assert doc["meta"]["fallback"] == "free_endpoint_after_403"
+    assert doc["meta"]["request"]["path"] == "/api/v2/language/models/free"
+
+
+@respx.mock
+def test_403_fallback_failure_surfaces_original_error(
+    store: SnapshotStore, data_dir: Path
+) -> None:
+    """403 + failed fallback -> the ORIGINAL authenticated-endpoint 403 raises."""
+    respx.get(f"{BASE}/api/v2/language/models").mock(
+        return_value=httpx.Response(403, json={"error": "requires a Pro subscription"})
+    )
+    respx.get(f"{BASE}/api/v2/language/models/free").mock(
+        # 401 is non-retryable: surfaces immediately as HTTPStatusError.
+        return_value=httpx.Response(401, json={"error": "unauthorized"})
+    )
+    collector = make_collector(
+        store, data_dir, api_key="free-tier-key", client=httpx.Client(base_url=BASE, timeout=5)
+    )
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        collector.collect(now=NOW)
+    assert excinfo.value.response.status_code == 403
+
+
 class TestQuotaTracker:
     def test_window_rolls_after_24h(self, tmp_path: Path) -> None:
         tracker = QuotaTracker(tmp_path / "q.json", budget=100)

@@ -112,6 +112,7 @@ def evaluate_routers(
 
     results: dict[str, Any] = {
         "splits": {},
+        "chooser_errors": [],
         "label_provenance": "bootstrap_prior",
         "caveat": (
             "Metrics are computed against bootstrap_prior labels (bootstrap "
@@ -126,9 +127,90 @@ def evaluate_routers(
         groups = group_examples(examples)
         split_result: dict[str, Any] = {}
         for name, choose in choosers.items():
-            split_result[name] = _evaluate_chooser(groups, choose, config)
+            metrics = _evaluate_chooser_split(
+                groups,
+                choose,
+                config,
+                split=split,
+                chooser=name,
+                chooser_errors=results["chooser_errors"],
+            )
+            if metrics is not None:
+                split_result[name] = metrics
         results["splits"][split] = split_result
     return results
+
+
+def _evaluate_chooser_split(
+    groups: dict[str, list[DatasetExample]],
+    choose: Chooser,
+    config: RouterConfig,
+    split: str,
+    chooser: str,
+    chooser_errors: list[dict[str, str]],
+) -> dict[str, float] | None:
+    """Evaluate one chooser on one split, PER PHASE, never dropping it whole.
+
+    A reference chooser that raises for a phase group (e.g. the deterministic
+    policy failing closed on "no candidate meets threshold") must NOT silently
+    remove the chooser from the whole split: the error is recorded in
+    ``chooser_errors`` as {split, phase, chooser, error}, that phase is
+    skipped for this chooser only, and the remaining phases still contribute
+    metrics (group-count-weighted merge). Returns None only when the chooser
+    failed for EVERY phase in the split.
+    """
+    by_phase: dict[str, dict[str, list[DatasetExample]]] = {}
+    for task_id, group in groups.items():
+        phase = group[0].phase
+        by_phase.setdefault(phase, {})[task_id] = group
+
+    merged: list[dict[str, float]] = []
+    for phase, phase_groups in by_phase.items():
+        try:
+            merged.append(_evaluate_chooser(phase_groups, choose, config))
+        except Exception as exc:
+            chooser_errors.append(
+                {"split": split, "phase": phase, "chooser": chooser, "error": str(exc)}
+            )
+            logger.warning(
+                "evaluation chooser_error split=%s phase=%s chooser=%s error=%s",
+                split,
+                phase,
+                chooser,
+                exc,
+            )
+    if not merged:
+        return None
+    return _merge_phase_metrics(merged)
+
+
+# Metrics that are ratios over groups / successes / tokens are re-derived by
+# _merge_phase_metrics from the private counters below; everything else is a
+# group-count-weighted mean across phases.
+_DERIVED_KEYS = ("groups", "tokens_per_task", "tokens_per_success", "success_rate")
+
+
+def _merge_phase_metrics(per_phase: list[dict[str, float]]) -> dict[str, float]:
+    """Merge per-phase metric dicts, weighting by group counts.
+
+    ``_evaluate_chooser`` stashes ``_groups`` / ``_successes`` /
+    ``_total_tokens`` so tokens_per_task / tokens_per_success / success_rate
+    remain exact under merging instead of becoming averages of averages.
+    """
+    groups = int(sum(m["_groups"] for m in per_phase))
+    successes = int(sum(m["_successes"] for m in per_phase))
+    total_tokens = sum(m["_total_tokens"] for m in per_phase)
+    out: dict[str, float] = {"groups": float(groups)}
+    for key in METRIC_KEYS:
+        if key in _DERIVED_KEYS:
+            continue
+        out[key] = (
+            sum(m[key] * m["_groups"] for m in per_phase) / groups if groups else 0.0
+        )
+    out["tokens_per_task"] = total_tokens / groups if groups else 0.0
+    out["tokens_per_success"] = total_tokens / successes if successes else 0.0
+    out["success_rate"] = successes / groups if groups else 0.0
+    return out
 
 
 def _evaluate_chooser(
@@ -177,7 +259,7 @@ def _evaluate_chooser(
     n = len(outcomes)
     total_tokens = sum(o.tokens for o in outcomes)
     successes = sum(1 for o in outcomes if o.success)
-    return {
+    metrics: dict[str, float] = {
         "groups": float(n),
         "top1_accuracy": top1_hits / n if n else 0.0,
         "top3_recall": top3_hits / n if n else 0.0,
@@ -190,6 +272,11 @@ def _evaluate_chooser(
         "mean_quality": sum(o.chosen.label_utility for o in outcomes) / n if n else 0.0,
         "routing_regret": sum(o.regret for o in outcomes) / n if n else 0.0,
     }
+    # Private merge counters (consumed by _merge_phase_metrics, stripped there).
+    metrics["_groups"] = float(n)
+    metrics["_successes"] = float(successes)
+    metrics["_total_tokens"] = total_tokens
+    return metrics
 
 
 def _ranker_chooser(dataset: DatasetV1, model: Any, tokenizer: Any) -> Chooser:

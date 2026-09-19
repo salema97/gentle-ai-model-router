@@ -129,3 +129,40 @@ def test_export_writes_artifact(tmp_path: Path) -> None:
     assert explore["thresholds"]["threshold_quality"] == 0.6
     assert explore["weights"]
     assert explore["alternatives"]
+
+
+def test_calibrate_thresholds_one_phase(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    _seed_registry(data_dir)
+    result = runner.invoke(
+        app, ["calibrate-thresholds", "--phase", "explore", "--data-dir", str(data_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "threshold calibration" in result.output
+    assert "explore" in result.output
+    assert "current" in result.output and "suggested" in result.output
+    assert "min(max(current, p50), p90)" in result.output
+
+
+def test_calibrate_thresholds_all_phases(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    _seed_registry(data_dir)
+    result = runner.invoke(app, ["calibrate-thresholds", "--data-dir", str(data_dir)])
+    assert result.exit_code == 0, result.output
+    for phase in ("init", "explore", "research", "propose", "spec", "design",
+                  "tasks", "apply", "verify", "archive", "onboard"):
+        assert phase in result.output
+    # With two priors (0 and 1 normalized) the suggested floor sits at or
+    # above the current threshold: never suggests going down.
+    assert "meet" in result.output
+
+
+def test_calibrate_thresholds_unknown_phase_exits_0(tmp_path: Path) -> None:
+    """Informational command: even a usage error exits 0."""
+    data_dir = tmp_path / "data"
+    _seed_registry(data_dir)
+    result = runner.invoke(
+        app, ["calibrate-thresholds", "--phase", "bogus", "--data-dir", str(data_dir)]
+    )
+    assert result.exit_code == 0
+    assert "unknown phase" in result.output

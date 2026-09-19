@@ -142,6 +142,78 @@ def test_apply_arena_snapshot(tmp_path, store):
         assert model.canonical_id == "anthropic/claude-sonnet-4"
 
 
+def test_apply_real_free_payload_prices_and_benchmarks(tmp_path, aa_free_payload):
+    """The VERIFIED free-endpoint shape must persist prices + all benchmarks."""
+    from datetime import UTC, datetime
+
+    engine = _engine(tmp_path)
+    snapshot_doc = {
+        "snapshot_id": "snap-free-01",
+        "fetched_at": datetime(2026, 9, 19, 2, 11, tzinfo=UTC).isoformat(),
+        "data": aa_free_payload,
+        "meta": {"record_count": 2},
+    }
+    with Session(engine) as session:
+        counts = registry_db.apply_aa_snapshot(session, snapshot_doc)
+        session.commit()
+
+    assert counts["models"] == 2
+    assert counts["prices"] == 2  # both records carry 1M-token prices
+    # 3 AA indices on Gemini + intelligence on GLM + cost-per-task + tps/ttft
+    assert counts["benchmarks"] == 3 + 1 + 1 + 2 + 2
+
+    with Session(engine) as session:
+        glm = session.query(Model).filter_by(canonical_id="Z AI/glm-4-5v").one()
+        assert glm.org == "Z AI"
+        assert glm.name == "GLM-4.5V (Non-reasoning)"
+        assert glm.context_window is None  # free tier does not include it
+
+        dep = session.query(Deployment).filter_by(model_id=glm.id).one()
+        price = session.query(ModelPrice).filter_by(deployment_id=dep.id).one()
+        assert price.input_price == 0.6  # USD per 1M tokens, stored verbatim
+        assert price.output_price == 1.8
+        assert price.cached_input_price is None
+        assert price.source_snapshot_id == "snap-free-01"
+
+        benches = {
+            b.benchmark: b
+            for b in session.query(ModelBenchmark).filter_by(model_id=glm.id)
+        }
+        assert benches["artificial_analysis_intelligence_index"].score == 6.7
+        assert benches["aa_median_output_tps"].score == 37.71
+        assert benches["aa_median_ttft_seconds"].score == 2.71
+        # Null evaluations must NOT create benchmark rows.
+        assert "artificial_analysis_coding_index" not in benches
+        for bench in benches.values():
+            assert bench.source_snapshot_id == "snap-free-01"  # provenance
+            assert bench.category is None
+
+        gemini = session.query(Model).filter_by(canonical_id="Google/gemini-3-5-flash").one()
+        g_benches = {
+            b.benchmark: b.score
+            for b in session.query(ModelBenchmark).filter_by(model_id=gemini.id)
+        }
+        assert g_benches["artificial_analysis_coding_index"] == 70.1
+        assert g_benches["artificial_analysis_agentic_index"] == 27.3
+        assert g_benches["aa_intelligence_index_cost_per_task"] == 1.5625
+
+
+def test_normalize_real_free_record_ignores_uuid_names(aa_free_payload) -> None:
+    from gentle_ai_model_router.registry.normalize import normalize_aa_models
+
+    records = normalize_aa_models(aa_free_payload)
+    assert [r.canonical_id for r in records] == [
+        "Z AI/glm-4-5v",
+        "Google/gemini-3-5-flash",
+    ]
+    glm, gemini = records
+    assert glm.intelligence_index == 6.7
+    assert glm.input_price == 0.6 and glm.output_price == 1.8
+    assert glm.cached_write_price is None
+    assert gemini.cached_input_price == 0.15
+    assert gemini.benchmarks["artificial_analysis_agentic_index"] == 27.3
+
+
 def test_effort_adapters() -> None:
     # Pi speaks the full internal vocabulary (passthrough).
     assert provider_effort_value("pi", Effort.XHIGH) == "xhigh"

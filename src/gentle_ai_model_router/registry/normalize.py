@@ -83,7 +83,13 @@ def register_effort_adapter(
 
 @dataclass
 class NormalizedAAModel:
-    """One Artificial Analysis model record, normalized to registry shape."""
+    """One Artificial Analysis model record, normalized to registry shape.
+
+    ``benchmarks`` maps registry benchmark key -> score. The verified free
+    endpoint (2026-09-19 snapshot, docs/data-sources.md §1) contributes the
+    three AA indices plus informational rows (cost-per-task, tps, ttft);
+    the legacy defensive path contributes only the intelligence index.
+    """
 
     canonical_id: str
     org: str | None
@@ -97,9 +103,11 @@ class NormalizedAAModel:
     structured_output: bool | None = None
     reasoning_support: bool | None = None
     intelligence_index: float | None = None
+    benchmarks: dict[str, float] = field(default_factory=dict)
     input_price: float | None = None  # USD per 1M tokens
     output_price: float | None = None
     cached_input_price: float | None = None
+    cached_write_price: float | None = None  # NOT persisted: registry has no column
 
 
 @dataclass
@@ -177,7 +185,7 @@ def _extract_records(payload: Any) -> list[dict[str, Any]]:
 
 def _parse_provider_and_name(record: dict[str, Any]) -> tuple[str, str]:
     """Resolve (provider_key, model name) from a raw AA record defensively."""
-    name = _first(record, "model", "model_name", "model_id", "id", "name")
+    name = _first(record, "model", "model_name", "model_id", "name", "id")
     name = str(name) if name else "unknown"
     provider = _first(record, "provider", "provider_name", "provider_id", "company")
     if provider is None and "/" in name:
@@ -202,20 +210,147 @@ def _extract_pricing(record: dict[str, Any]) -> tuple[float | None, float | None
     return input_price, output_price, cached
 
 
+# Benchmark keys inside ``evaluations`` in the verified free-endpoint payload
+# (data/snapshots/2026-09-19/artificial-analysis.json). Stored under their full
+# AA key names so router.yaml weights match existing registry rows.
+_AA_EVALUATION_KEYS = (
+    "artificial_analysis_intelligence_index",
+    "artificial_analysis_coding_index",
+    "artificial_analysis_agentic_index",
+)
+
+
+def _is_real_free_record(record: dict[str, Any]) -> bool:
+    """Detect the VERIFIED free-endpoint shape (slug + model_creator/evaluations)."""
+    return isinstance(record.get("model_creator"), dict) or "slug" in record
+
+
+def _normalize_real_free_record(record: dict[str, Any]) -> NormalizedAAModel:
+    """Normalize one record of the real ``/language/models/free`` payload.
+
+    Verified field inventory of the free tier (200 records, 2026-09-19):
+    mapped — id, name, slug, release_date, model_creator.name, the three
+    ``evaluations`` indices, ``artificial_analysis_intelligence_index_cost``
+    (cost_per_task only), pricing ``price_1m_{input,output,cache_hit,
+    cache_write}_tokens``, performance ``median_output_tokens_per_second``
+    and ``median_time_to_first_token_seconds``.
+
+    NOT MAPPED (absent from the free tier; present only in Pro responses):
+    context window, max output, modalities, tool_calling, structured_output,
+    reasoning support flags, latency percentiles beyond the median. The free
+    tier also carries no provider/deployment info: provider_key is the model
+    creator and deployment_ref stays None (-> ``default``).
+    """
+    creator = record.get("model_creator")
+    org = creator.get("name") if isinstance(creator, dict) else None
+    org = str(org) if org else None
+    slug = record.get("slug")
+    slug = str(slug) if slug else None
+    name = record.get("name")
+    name = str(name) if name else (slug or "unknown")
+
+    benchmarks: dict[str, float] = {}
+    evaluations = record.get("evaluations")
+    if isinstance(evaluations, dict):
+        for key in _AA_EVALUATION_KEYS:
+            score = _as_float(evaluations.get(key))
+            if score is not None:
+                benchmarks[key] = score
+
+    # Informational benchmark rows (NOT part of any default phase weights).
+    # Index cost is a nested object; only the per-task figure is a plain number.
+    cost = record.get("artificial_analysis_intelligence_index_cost")
+    if isinstance(cost, dict):
+        per_task = cost.get("cost_per_task")
+        value = _as_float(per_task.get("total_cost") if isinstance(per_task, dict) else None)
+        if value is not None:
+            benchmarks["aa_intelligence_index_cost_per_task"] = value
+
+    pricing = record.get("pricing")
+    pricing = pricing if isinstance(pricing, dict) else {}
+    # Units: AA prices are USD per 1M tokens — the SAME unit the registry's
+    # ModelPrice columns use (estimate_cost divides by 1_000_000), so values
+    # are stored verbatim, no conversion.
+    input_price = _as_float(pricing.get("price_1m_input_tokens"))
+    output_price = _as_float(pricing.get("price_1m_output_tokens"))
+    cached = _as_float(pricing.get("price_1m_cache_hit_tokens"))
+    cached_write = _as_float(pricing.get("price_1m_cache_write_tokens"))
+
+    # Performance medians are stored as benchmark rows so the policy's
+    # speed_benchmark mechanism (inverse-normalized tps proxy) can use them
+    # once wired into router.yaml; ttft is informational (lower = better).
+    performance = record.get("performance")
+    performance = performance if isinstance(performance, dict) else {}
+    tps = _as_float(performance.get("median_output_tokens_per_second"))
+    if tps is not None:
+        benchmarks["aa_median_output_tps"] = tps
+    ttft = _as_float(performance.get("median_time_to_first_token_seconds"))
+    if ttft is not None:
+        benchmarks["aa_median_ttft_seconds"] = ttft
+
+    # Canonical id: ``<creator>/<slug>``. The slug is unique across the
+    # verified snapshot (checked: 0 duplicates among 200 records) and is far
+    # more stable/matchable than the uuid ``id`` or the display ``name``
+    # (which carries variant suffixes like "(Non-reasoning)").
+    if org and slug:
+        canonical_id = f"{org}/{slug}"
+    else:
+        canonical_id = slug or f"{org or 'unknown'}/{name}"
+    return NormalizedAAModel(
+        canonical_id=canonical_id,
+        org=org,
+        name=name,
+        provider_key=org or "unknown",
+        deployment_ref=None,
+        # context_window / max_output / modalities / capability flags: NOT
+        # MAPPED — the free endpoint does not include them.
+        intelligence_index=benchmarks.get("artificial_analysis_intelligence_index"),
+        benchmarks=benchmarks,
+        input_price=input_price,
+        output_price=output_price,
+        cached_input_price=cached,
+        cached_write_price=cached_write,
+    )
+
+
 def normalize_aa_models(payload: Any) -> list[NormalizedAAModel]:
     """Normalize an AA v2 payload into registry-shaped model records.
 
-    The exact v2 JSON schema is **PENDING VERIFICATION** (docs/data-sources.md
-    §1), so every field is extracted defensively from the most likely key
-    names; the raw payload is preserved in the snapshot regardless.
+    Two payload shapes are supported:
+
+    - the VERIFIED ``/language/models/free`` shape (docs/data-sources.md §1,
+      observed in data/snapshots/2026-09-19/artificial-analysis.json): a
+      wrapper object ``{"tier", "pagination", "data": [records]}`` whose
+      records carry ``slug`` / ``model_creator`` / ``evaluations`` /
+      ``pricing.price_1m_*`` / ``performance.median_*``;
+    - the pre-verification defensive guesses (flat records with
+      ``model``/``provider``/``pricing.input`` style keys), kept so older
+      fixtures and hypothetical Pro shapes still normalize.
     """
     out: list[NormalizedAAModel] = []
     for record in _extract_records(payload):
+        if _is_real_free_record(record):
+            out.append(_normalize_real_free_record(record))
+            continue
         provider_key, name = _parse_provider_and_name(record)
         input_price, output_price, cached = _extract_pricing(record)
         modalities = _first(record, "modalities", "modality", "input_modalities")
         if isinstance(modalities, str):
             modalities = [modalities]
+        intelligence_index = _as_float(
+            _first(
+                record,
+                "intelligence_index",
+                "intelligenceIndex",
+                "artificial_analysis_intelligence_index",
+                "intelligence",
+            )
+        )
+        benchmarks = (
+            {"artificial_analysis_intelligence_index": intelligence_index}
+            if intelligence_index is not None
+            else {}
+        )
         out.append(
             NormalizedAAModel(
                 canonical_id=f"{provider_key}/{name}",
@@ -235,15 +370,8 @@ def normalize_aa_models(payload: Any) -> list[NormalizedAAModel]:
                 reasoning_support=_as_bool(
                     _first(record, "reasoning", "reasoning_support", "supports_reasoning")
                 ),
-                intelligence_index=_as_float(
-                    _first(
-                        record,
-                        "intelligence_index",
-                        "intelligenceIndex",
-                        "artificial_analysis_intelligence_index",
-                        "intelligence",
-                    )
-                ),
+                intelligence_index=intelligence_index,
+                benchmarks=benchmarks,
                 input_price=input_price,
                 output_price=output_price,
                 cached_input_price=cached,

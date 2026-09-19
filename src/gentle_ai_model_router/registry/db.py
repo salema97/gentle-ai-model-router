@@ -352,7 +352,11 @@ def apply_aa_snapshot(session: Session, snapshot_doc: dict[str, Any]) -> dict[st
         )
         deployment = get_or_create_deployment(session, model, provider, rec.deployment_ref)
         counts["models"] += 1
-        if rec.input_price is not None or rec.output_price is not None:
+        if (
+            rec.input_price is not None
+            or rec.output_price is not None
+            or rec.cached_input_price is not None
+        ):
             upsert_price(
                 session,
                 deployment,
@@ -362,12 +366,16 @@ def apply_aa_snapshot(session: Session, snapshot_doc: dict[str, Any]) -> dict[st
                 cached_input_price=rec.cached_input_price,
             )
             counts["prices"] += 1
-        if rec.intelligence_index is not None:
+        # rec.benchmarks carries every mapped index (intelligence/coding/
+        # agentic + informational tps/ttft/cost rows); each becomes its own
+        # registry benchmark row with mandatory snapshot provenance.
+        # rec.cached_write_price is NOT persisted: ModelPrice has no column.
+        for benchmark, score in rec.benchmarks.items():
             upsert_benchmark(
                 session,
                 model,
-                benchmark="artificial_analysis_intelligence_index",
-                score=rec.intelligence_index,
+                benchmark=benchmark,
+                score=score,
                 category=None,
                 source_snapshot_id=snapshot_id,
             )

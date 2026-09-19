@@ -16,10 +16,25 @@ anything not directly verified is marked **UNVERIFIED**.
   `data/snapshots/artificial-analysis/<date>/`) before normalization, and load
   registry rows from snapshots when the quota is exhausted or the key absent.
 - Key via env var: `ARTIFICIAL_ANALYSIS_API_KEY` (see `.env.example`).
-- Expected fields (to confirm against first real response in Phase 1):
-  pricing per 1M input/output tokens, context window, latency percentiles,
-  throughput, provider/deployment identity, intelligence index.
-  **[PENDING VERIFICATION: exact v2 JSON schema.]**
+- **VERIFIED (2026-09-19)**: real free-endpoint snapshot collected at
+  `data/snapshots/2026-09-19/artificial-analysis.json` (200 models, page 1 of
+  4, `tier: "free"`, `intelligence_index_version: 4.3`). Payload is a wrapper
+  `{"tier", "intelligence_index_version", "pagination", "data": [records]}`;
+  each record has: `id` (uuid), `name`, `slug`, `release_date`,
+  `model_creator: {id, name}`, `evaluations` (`artificial_analysis_{intelligence,coding,agentic}_index`,
+  nullable), `artificial_analysis_intelligence_index_cost.cost_per_task.total_cost`,
+  `pricing.price_1m_{input,output,cache_hit,cache_write}_tokens` (USD per 1M
+  tokens — the SAME unit the registry stores), and `performance` medians
+  (`median_output_tokens_per_second`, `median_time_to_first_token_seconds`,
+  `median_time_to_first_answer_token_seconds`,
+  `median_end_to_end_response_time_seconds`). The free tier does NOT include:
+  context window, max output, modalities, tool-calling/structured-output/
+  reasoning flags (NOT MAPPED — Pro only). Canonical id =
+  `<model_creator.name>/<slug>` (slug verified unique across 200 records).
+- Expected fields that arrived with the verified shape: pricing per 1M
+  input/output/cache-hit tokens, intelligence/coding/agentic indices,
+  median throughput/TTFT. Still **UNVERIFIED** (Pro tier or later): context
+  window, latency percentiles, provider/deployment identity.
 
 ## 2. LMArena leaderboard — category quality PRIOR
 

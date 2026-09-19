@@ -18,6 +18,7 @@ to the achievable-prior frontier", not as production quality estimates.
 from __future__ import annotations
 
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -128,3 +129,71 @@ def _calibrate_phase(session: Session, config: RouterConfig, phase: str) -> Cali
         fraction_meeting=fraction_meeting,
         suggested=suggested,
     )
+
+
+def compute_brier_score(
+    predictions: Sequence[float],
+    targets: Sequence[int | float],
+) -> float:
+    """Compute the Brier score (mean squared error of probability predictions).
+
+    BS = (1 / N) * sum((p_i - y_i)^2)
+
+    For binary outcomes, lower is better (0.0 = perfect calibration and discrimination).
+    """
+    if len(predictions) != len(targets):
+        raise ValueError(
+            f"predictions and targets must have same length, "
+            f"got {len(predictions)} vs {len(targets)}"
+        )
+    if not predictions:
+        raise ValueError("predictions and targets must not be empty")
+    return float(
+        sum((p - y) ** 2 for p, y in zip(predictions, targets, strict=True)) / len(predictions)
+    )
+
+
+def compute_expected_calibration_error(
+    probabilities: Sequence[float],
+    targets: Sequence[int | float],
+    num_bins: int = 10,
+) -> float:
+    """Compute the Expected Calibration Error (ECE) across partitioned probability bins.
+
+    Partitions [0.0, 1.0] into `num_bins` equal-width bins. For each bin:
+      acc(B_m) = mean(y_i for i in B_m)
+      conf(B_m) = mean(p_i for i in B_m)
+      ece = sum(|B_m| / N * |acc(B_m) - conf(B_m)|)
+    """
+    if len(probabilities) != len(targets):
+        raise ValueError(
+            f"probabilities and targets must have same length, "
+            f"got {len(probabilities)} vs {len(targets)}"
+        )
+    if num_bins <= 0:
+        raise ValueError(f"num_bins must be positive, got {num_bins}")
+    n = len(probabilities)
+    if n == 0:
+        raise ValueError("probabilities and targets must not be empty")
+
+    bin_sums_conf = [0.0] * num_bins
+    bin_sums_acc = [0.0] * num_bins
+    bin_counts = [0] * num_bins
+
+    for p, y in zip(probabilities, targets, strict=True):
+        clamped_p = max(0.0, min(1.0, float(p)))
+        bin_idx = min(int(clamped_p * num_bins), num_bins - 1)
+        bin_sums_conf[bin_idx] += clamped_p
+        bin_sums_acc[bin_idx] += float(y)
+        bin_counts[bin_idx] += 1
+
+    ece = 0.0
+    for i in range(num_bins):
+        cnt = bin_counts[i]
+        if cnt > 0:
+            bin_conf = bin_sums_conf[i] / cnt
+            bin_acc = bin_sums_acc[i] / cnt
+            ece += (cnt / n) * abs(bin_acc - bin_conf)
+
+    return float(ece)
+

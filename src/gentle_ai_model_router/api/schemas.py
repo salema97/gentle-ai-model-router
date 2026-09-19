@@ -10,11 +10,34 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from gentle_ai_model_router.registry.normalize import Effort
 
 _EFFORT_VALUES = tuple(level.value for level in Effort)
+
+
+class SystemOneMeta(BaseModel):
+    """Calibrated non-autoregressive decision primitives for System One routing."""
+
+    effort_score: float | None = None
+    effort_probabilities: dict[str, float] | None = None
+    noul_fast_success: float | None = None
+    calibrated: bool = False
+
+    @property
+    def noul_fast_success_probability(self) -> float | None:
+        """Alias for noul_fast_success."""
+        return self.noul_fast_success
+
+    @model_validator(mode="before")
+    @classmethod
+    def _handle_noul_alias(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "noul_fast_success" not in data and "noul_fast_success_probability" in data:
+                data = dict(data)
+                data["noul_fast_success"] = data["noul_fast_success_probability"]
+        return data
 
 
 class RouteRequest(BaseModel):
@@ -74,6 +97,9 @@ class RouteResponse(BaseModel):
     estimated_cost: float
     policy_version: str
     registry_hash: str
+    confidence: float | None = None
+    probabilities: dict[str, float] | None = None
+    system_one: SystemOneMeta | None = None
 
 
 class ExecutionIn(BaseModel):

@@ -640,8 +640,8 @@ def explain(
 
     try:
         with registry_db.Session(engine) as session:
+            decision = select_candidate(session, phase_name, config)
             if as_json:
-                decision = select_candidate(session, phase_name, config)
                 console.print(json.dumps(decision.to_dict(), indent=2))
                 return
             ranking = rank_candidates(session, phase_name, config)
@@ -656,6 +656,15 @@ def explain(
     summary.add_row("registry (model,deployment) pairs", str(ranking.pairs_considered))
     summary.add_row("threshold_quality", str(ranking.threshold))
     summary.add_row("policy_version", ranking.policy_version)
+    if decision.confidence is not None:
+        summary.add_row("confidence (calibrated)", f"{decision.confidence:.2%}")
+    if decision.system_one:
+        eff = decision.system_one.get("effort_score")
+        if eff is not None:
+            summary.add_row(escape("effort expected (E[k])"), f"{eff:.2f}")
+        noul = decision.system_one.get("noul_fast_success")
+        if noul is not None:
+            summary.add_row("P(fast_success)", f"{noul:.2%}")
     console.print(summary)
 
     winner = ranking.candidates[0]

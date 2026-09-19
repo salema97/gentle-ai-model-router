@@ -22,6 +22,7 @@ from gentle_ai_model_router.api.schemas import (
     ExecutionIngestResponse,
     RouteRequest,
     RouteResponse,
+    SystemOneMeta,
 )
 from gentle_ai_model_router.integration import telemetry_shim
 from gentle_ai_model_router.integration.outcome import (
@@ -49,12 +50,17 @@ from gentle_ai_model_router.router.policy import (
     rank_candidates,
 )
 from gentle_ai_model_router.router.reward import aggregate_rewards, compute_rewards
+from gentle_ai_model_router.router.system_one import evaluate_system_one
 
 logger = logging.getLogger(__name__)
 
 
 def _decision_to_response(decision: Decision, registry_hash: str) -> RouteResponse:
     """Map a policy Decision to the wire contract (registry_hash attached)."""
+    system_one_meta = None
+    if decision.system_one is not None:
+        system_one_meta = SystemOneMeta(**decision.system_one)
+
     return RouteResponse(
         model=decision.model,
         deployment=decision.deployment,
@@ -69,6 +75,9 @@ def _decision_to_response(decision: Decision, registry_hash: str) -> RouteRespon
         estimated_cost=decision.estimated_cost,
         policy_version=decision.policy_version,
         registry_hash=registry_hash,
+        confidence=decision.confidence,
+        probabilities=decision.probabilities,
+        system_one=system_one_meta,
     )
 
 
@@ -259,6 +268,8 @@ def create_app(
                 ):
                     reasons.append("cheapest_of_meeting")
 
+                sys1 = evaluate_system_one(ranking, context, app.state.ranker)
+
                 decision = Decision(
                     phase=ranking.phase,
                     model=winner.model.canonical_id,
@@ -283,6 +294,9 @@ def create_app(
                     estimated_tokens=winner.estimated_tokens,
                     estimated_cost=round(winner.estimated_cost, 6),
                     policy_version=ranking.policy_version,
+                    confidence=sys1.confidence,
+                    probabilities=sys1.probabilities,
+                    system_one=sys1.to_dict(),
                 )
                 candidate_count = len(ranking.candidates)
         except PolicyError as exc:

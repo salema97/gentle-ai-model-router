@@ -302,6 +302,10 @@ def select_candidate(
         for c in ranking.candidates[1 : policy.top_k]
     )
     reasons = list(winner.reason_codes) + ["cheapest_of_meeting"]
+    from gentle_ai_model_router.router.system_one import evaluate_system_one
+
+    sys1 = evaluate_system_one(ranking, context)
+
     return Decision(
         phase=ranking.phase,
         model=winner.model.canonical_id,
@@ -315,6 +319,9 @@ def select_candidate(
         estimated_tokens=winner.estimated_tokens,
         estimated_cost=round(winner.estimated_cost, 6),
         policy_version=ranking.policy_version,
+        confidence=sys1.confidence,
+        probabilities=sys1.probabilities,
+        system_one=sys1.to_dict(),
     )
 
 

@@ -42,6 +42,7 @@ Gentle AI integration evidence: `docs/gentle-ai-integration-research.md`.
 | 4 | Bandit/policy loop on telemetry (outcome rubric → rewards → constrained UCB over threshold-meeting arms; cold start byte-identical to the deterministic policy); Pi + Codex adapters (state-file route) | ✅ done |
 | 4a | Runtime hook plugins feeding the shim (OpenCode `message.updated`/`SubagentStop`, Pi `turn_context`) | ✅ done |
 | 5 | ModernBERT phase/context ranker retrained on telemetry; threshold tuning; learned-policy promotion workflow | ✅ done |
+| 6 | TypeSafe Jev "System One" calibrated decision routing (`Choice`, `Score`, `Noul` primitives over ModernBERT; calibrated confidence; non-autoregressive single-pass inference) | ✅ done |
 
 ## Quickstart
 
@@ -64,7 +65,8 @@ curl -s -X POST http://127.0.0.1:8377/route \
   -H 'content-type: application/json' \
   -d '{"task": "refactor auth module", "phase": "sdd-apply"}'
 # → {model, deployment, effort, score, alternatives, reason_codes,
-#    estimated_tokens, estimated_cost, policy_version, registry_hash}
+#    estimated_tokens, estimated_cost, policy_version, registry_hash,
+#    confidence, probabilities, system_one: {effort_score, noul_fast_success}}
 
 # 5. Export the active policy artifact (consumed by the Gentle AI integration).
 router export   # writes models/policy/<policy_version>.json

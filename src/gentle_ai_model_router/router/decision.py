@@ -65,6 +65,9 @@ class Decision:
     estimated_tokens: float
     estimated_cost: float
     policy_version: str  # hash of the effective policy configuration
+    confidence: float | None = None
+    probabilities: dict[str, float] | None = None
+    system_one: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

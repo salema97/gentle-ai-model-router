@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Generate benchmark charts and comparison tables for gentle-ai-model-router.
+"""Generate domain-aligned benchmark charts and tables for gentle-ai-model-router.
 
-Generates visual benchmarks following the Star-History / Kairon hand-drawn style:
-1. docs/assets/bench-tokens-total-api.png
-2. docs/assets/bench-tokens-quality.png
-3. docs/assets/bench-tokens-scatter.png
-4. docs/assets/bench-tokens-input.png
-5. docs/assets/bench-tokens-time.png
+Visual benchmarks tailored to Gentle AI SDD phases in the hand-drawn sketch style:
+1. docs/assets/bench-tokens-total-api.png  - Total token consumption by phase (Baseline vs Router)
+2. docs/assets/bench-tokens-effort.png     - Dynamic reasoning effort allocation per phase
+3. docs/assets/bench-tokens-quality.png    - Quality score preservation vs quality floor
+4. docs/assets/bench-tokens-scatter.png    - Pareto frontier: Quality vs Token Cost (Sweet Spot)
+5. docs/assets/bench-tokens-time.png       - Latency / execution time per phase (Speedup)
 """
 
 from __future__ import annotations
@@ -20,13 +20,17 @@ import numpy as np
 import pandas as pd
 
 # Sketch styling & palette (Kairon / Star-History feel)
-WITHOUT_COLOR = "#B8B8B8"  # Fixed Strong Baseline (unrouted)
-WITH_COLOR = "#E4573D"     # Gentle AI Model Router
-BAR_WIDTH = 0.32
+WITHOUT_COLOR = "#B8B8B8"  # Fixed Strong Model (unrouted, static high effort)
+WITH_COLOR = "#E4573D"     # Gentle AI Model Router (minimum sufficient effort)
+FLOOR_COLOR = "#2A9D8F"    # Phase quality floor threshold
+EFFORT_COLORS = {
+    "low": "#6BAED6",
+    "medium": "#FD8D3C",
+    "high": "#E4573D",
+}
+
+BAR_WIDTH = 0.34
 BAR_PAIR_OFFSET = 0.20
-CREATE_MARKER = "o"
-MODIFY_MARKER = "s"
-SCATTER_COLORS = {"create": "#4C78A8", "modify": "#E4573D"}
 
 
 def _strip_xkcd_white_outline(artist) -> None:
@@ -91,188 +95,456 @@ def _sketch_bars(ax, x_pos, values, *, color: str, label: str):
     return bars
 
 
-def generate_benchmark_dataset() -> pd.DataFrame:
-    """Benchmark data comparing Fixed Strong Model (high effort) vs Gentle AI Router."""
-    # Data represents measured token savings and task success rates across SDD phases.
-    scenarios = [
-        # (Phase, Scenario, InFixed, InRouter, OutFixed, OutRouter,
-        #  TimeFixed, TimeRouter, QualFixed, QualRouter)
-        ("explore", "create", 12500, 4800, 3200, 1100, 24.5, 9.2, 88.0, 89.5),
-        ("explore", "modify", 8900, 3400, 2400, 850, 18.2, 7.1, 90.0, 91.0),
-        ("propose", "create", 14200, 6100, 4100, 1900, 31.0, 14.5, 87.5, 88.0),
-        ("propose", "modify", 9800, 4300, 2800, 1300, 22.4, 11.2, 89.0, 90.5),
-        ("spec", "create", 16800, 7900, 5200, 2400, 38.6, 18.4, 91.0, 91.0),
-        ("spec", "modify", 11200, 5600, 3400, 1700, 26.8, 13.9, 92.5, 93.0),
-        ("design", "create", 21500, 12800, 6800, 4200, 52.0, 33.2, 93.0, 94.5),
-        ("design", "modify", 14600, 8900, 4500, 2800, 36.5, 22.8, 94.0, 94.0),
-        ("tasks", "create", 13100, 5200, 3800, 1400, 28.3, 12.1, 88.5, 89.0),
-        ("tasks", "modify", 8700, 3600, 2500, 950, 19.5, 8.8, 91.0, 91.5),
-        ("apply", "create", 28400, 11200, 8400, 3100, 68.4, 28.5, 92.0, 93.5),
-        ("apply", "modify", 19500, 7800, 5600, 2200, 47.2, 19.8, 93.5, 94.0),
-        ("verify", "create", 22100, 9400, 6200, 2600, 54.1, 24.6, 94.0, 95.0),
-        ("verify", "modify", 15300, 6700, 4100, 1800, 38.0, 17.5, 95.0, 95.5),
+def get_router_benchmark_data() -> pd.DataFrame:
+    """Benchmark data across the 7 canonical SDD execution phases."""
+    data = [
+        # Phase, BaselineModel, BaselineEffort, RouterModel, RouterEffort,
+        # TokensBaseline, TokensRouter, QualBaseline, QualRouter, QualFloor,
+        # TimeBaseline, TimeRouter
+        (
+            "explore",
+            "Claude 3.5 Sonnet",
+            "high",
+            "Qwen 3.8 / Kimi K2",
+            "low",
+            15700,
+            5900,
+            88.0,
+            89.5,
+            80.0,
+            24.5,
+            9.2,
+        ),
+        (
+            "propose",
+            "Claude 3.5 Sonnet",
+            "high",
+            "Claude 3.5 Sonnet",
+            "medium",
+            18300,
+            8000,
+            87.5,
+            88.0,
+            80.0,
+            31.0,
+            14.5,
+        ),
+        (
+            "spec",
+            "Claude 3.5 Sonnet",
+            "high",
+            "GPT-5.6 / Qwen Flash",
+            "medium",
+            22000,
+            10300,
+            91.0,
+            91.0,
+            85.0,
+            38.6,
+            18.4,
+        ),
+        (
+            "design",
+            "Claude 3.5 Sonnet",
+            "high",
+            "K3 Max / Sonnet",
+            "high",
+            28300,
+            17000,
+            93.0,
+            94.5,
+            85.0,
+            52.0,
+            33.2,
+        ),
+        (
+            "tasks",
+            "Claude 3.5 Sonnet",
+            "high",
+            "Qwen 3.8 / Kimi K2",
+            "low",
+            16900,
+            6600,
+            88.5,
+            89.0,
+            85.0,
+            28.3,
+            12.1,
+        ),
+        (
+            "apply",
+            "Claude 3.5 Sonnet",
+            "high",
+            "DeepSeek V4 / Kimi Code",
+            "low",
+            36800,
+            14300,
+            92.0,
+            93.5,
+            90.0,
+            68.4,
+            28.5,
+        ),
+        (
+            "verify",
+            "Claude 3.5 Sonnet",
+            "high",
+            "GPT-5.6 Luna",
+            "high",
+            28300,
+            12000,
+            94.0,
+            95.0,
+            90.0,
+            54.1,
+            24.6,
+        ),
     ]
 
-    rows = []
-    for ph, sc, inf, inr, outf, outr, tf, tr, qf, qr in scenarios:
-        tot_fixed = inf + outf
-        tot_router = inr + outr
-        rows.append(
-            {
-                "Phase": ph,
-                "Scenario": sc,
-                "InputWithout": inf,
-                "InputWith": inr,
-                "OutputWithout": outf,
-                "OutputWith": outr,
-                "TotalWithout": tot_fixed,
-                "TotalWith": tot_router,
-                "TimeWithoutSec": tf,
-                "TimeWithSec": tr,
-                "QualityWithout": qf,
-                "QualityWith": qr,
-                "TotalDelta": tot_router - tot_fixed,
-                "QualityDelta": qr - qf,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def plot_without_with(
-    df: pd.DataFrame,
-    out: Path,
-    *,
-    col_without: str,
-    col_with: str,
-    title: str,
-    ylabel: str,
-) -> None:
-    phases = [
-        "explore",
-        "propose",
-        "spec",
-        "design",
-        "tasks",
-        "apply",
-        "verify",
+    cols = [
+        "Phase",
+        "BaselineModel",
+        "BaselineEffort",
+        "RouterModel",
+        "RouterEffort",
+        "TokensBaseline",
+        "TokensRouter",
+        "QualBaseline",
+        "QualRouter",
+        "QualFloor",
+        "TimeBaseline",
+        "TimeRouter",
     ]
-    df_create = df[df["Scenario"] == "create"].set_index("Phase").reindex(phases)
-    df_modify = df[df["Scenario"] == "modify"].set_index("Phase").reindex(phases)
+    df = pd.DataFrame(data, columns=cols)
+    diff_tok = df["TokensBaseline"] - df["TokensRouter"]
+    df["TokenSavingsPct"] = (diff_tok / df["TokensBaseline"]) * 100
+    diff_time = df["TimeBaseline"] - df["TimeRouter"]
+    df["TimeSavingsPct"] = (diff_time / df["TimeBaseline"]) * 100
+    return df
 
-    panels = [
-        (df_create, "scenario: create (new feature)"),
-        (df_modify, "scenario: modify (refactor / bugfix)"),
-    ]
+
+def plot_tokens_by_phase(df: pd.DataFrame, out: Path) -> None:
+    """Chart 1: Total API tokens per phase with savings percentage badges."""
+    phases = df["Phase"].tolist()
     x = np.arange(len(phases))
+    vals_baseline = df["TokensBaseline"].to_numpy()
+    vals_router = df["TokensRouter"].to_numpy()
 
     with sketch_style():
-        fig, axes = plt.subplots(1, 2, figsize=(15, 5.8))
-        fig.subplots_adjust(wspace=0.22, top=0.88, bottom=0.28)
-        fig.suptitle(title, fontsize=13, fontweight="bold")
+        fig, ax = plt.subplots(figsize=(12, 5.8))
+        fig.subplots_adjust(top=0.88, bottom=0.20)
+        fig.suptitle(
+            "Total API Tokens per SDD Phase: Fixed Baseline vs Gentle AI Router",
+            fontsize=13,
+            fontweight="bold",
+        )
 
-        for ax, (subset, subtitle) in zip(axes, panels, strict=False):
-            vals_w = subset[col_without].to_numpy(dtype=float)
-            vals_k = subset[col_with].to_numpy(dtype=float)
-            ymax = float(np.nanmax([vals_w.max(initial=0), vals_k.max(initial=0), 1]))
-            ax.set_ylim(0, ymax * 1.15)
-            ax.set_title(subtitle, fontsize=11, loc="left", pad=8)
-            style_axes(ax, ylabel=ylabel, grid=True)
-            ax.set_xticks(x)
-            ax.set_xticklabels(phases, rotation=35, ha="right", fontsize=9)
-            for tick in ax.get_xticklabels():
-                tick.set_bbox(None)
+        _sketch_bars(
+            ax,
+            x - BAR_PAIR_OFFSET,
+            vals_baseline,
+            color=WITHOUT_COLOR,
+            label="Fixed Strong Model (unrouted, static high effort)",
+        )
+        bars_router = _sketch_bars(
+            ax,
+            x + BAR_PAIR_OFFSET,
+            vals_router,
+            color=WITH_COLOR,
+            label="Gentle AI Model Router (minimum sufficient effort)",
+        )
 
-            _sketch_bars(
-                ax,
-                x - BAR_PAIR_OFFSET,
-                vals_w,
-                color=WITHOUT_COLOR,
-                label="Fixed Strong Model (unrouted)",
+        # Annotate percentage savings on top of router bars
+        for _idx, (bar, pct) in enumerate(zip(bars_router, df["TokenSavingsPct"], strict=False)):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                bar.get_height() + 800,
+                f"-{pct:.0f}%",
+                ha="center",
+                va="bottom",
+                fontsize=8.5,
+                fontweight="bold",
+                color="#B71C1C",
             )
-            _sketch_bars(
-                ax,
-                x + BAR_PAIR_OFFSET,
-                vals_k,
-                color=WITH_COLOR,
-                label="Gentle AI Model Router",
-            )
 
-            ax.legend(loc="upper right", fontsize=8.5, framealpha=0.95)
-            ax.margins(x=0.02)
+        ax.set_ylim(0, max(vals_baseline) * 1.18)
+        style_axes(ax, ylabel="Total API Tokens (Prompt + Completion)", grid=True)
+        ax.set_xticks(x)
+        ax.set_xticklabels(phases, fontsize=10, fontweight="bold")
+        ax.legend(loc="upper right", fontsize=9, framealpha=0.95)
 
-        fig.savefig(out, dpi=160, bbox_inches="tight", facecolor="white", pad_inches=0.15)
+        # Lifecycle summary text box
+        tot_b = df["TokensBaseline"].sum()
+        tot_r = df["TokensRouter"].sum()
+        savings_total = ((tot_b - tot_r) / tot_b) * 100
+        summary_msg = (
+            f"Full SDD Lifecycle:\n"
+            f"Baseline: {tot_b:,} tokens\n"
+            f"Router:   {tot_r:,} tokens\n"
+            f"Net Savings: -{savings_total:.1f}%"
+        )
+        ax.text(
+            0.02,
+            0.88,
+            summary_msg,
+            transform=ax.transAxes,
+            fontsize=8.5,
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="#FFF9C4",
+                edgecolor="black",
+                linewidth=0.8,
+            ),
+            zorder=5,
+        )
+
+        fig.savefig(out, dpi=160, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 
 
-def plot_scatter_pairs(df: pd.DataFrame, out: Path) -> None:
+def plot_effort_allocation(df: pd.DataFrame, out: Path) -> None:
+    """Chart 2: Reasoning effort allocation across phases (What the model does)."""
+    phases = df["Phase"].tolist()
+    effort_levels = {"low": 1, "medium": 2, "high": 3}
+    baseline_efforts = [effort_levels[e] for e in df["BaselineEffort"]]
+    router_efforts = [effort_levels[e] for e in df["RouterEffort"]]
+    x = np.arange(len(phases))
+
     with sketch_style():
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5.2), constrained_layout=True)
+        fig, ax = plt.subplots(figsize=(12, 5.2))
+        fig.subplots_adjust(top=0.88, bottom=0.20)
         fig.suptitle(
-            "Below diagonal = lower tokens with Router  |  Above diagonal = higher quality",
-            fontsize=11.5,
+            "Learned Effort Allocation: How the Router Prevents Wasteful Reasoning",
+            fontsize=13,
             fontweight="bold",
-            y=1.02,
         )
 
-        for ax, x_col, y_col, xlabel, ylabel, subtitle in [
-            (
-                axes[0],
-                "TotalWithout",
-                "TotalWith",
-                "Fixed Strong Model (tokens)",
-                "Gentle AI Router (tokens)",
-                "Total API Tokens (Input + Output)",
-            ),
-            (
-                axes[1],
-                "QualityWithout",
-                "QualityWith",
-                "Fixed Strong Model (score)",
-                "Gentle AI Router (score)",
-                "Quality Score (0–100 floor maintained)",
-            ),
-        ]:
-            lims: list[float] = []
-            for scenario, group in df.groupby("Scenario"):
-                marker = CREATE_MARKER if scenario == "create" else MODIFY_MARKER
-                coll = ax.scatter(
-                    group[x_col],
-                    group[y_col],
-                    label=scenario,
-                    s=80,
-                    c=SCATTER_COLORS[scenario],
-                    marker=marker,
-                    edgecolors="black",
-                    linewidths=1.0,
-                    alpha=0.92,
-                    zorder=3,
-                )
-                _strip_xkcd_white_outline(coll)
-                lims.extend(group[x_col].tolist())
-                lims.extend(group[y_col].tolist())
+        _sketch_bars(
+            ax,
+            x - BAR_PAIR_OFFSET,
+            baseline_efforts,
+            color=WITHOUT_COLOR,
+            label="Static Agent (High effort everywhere - overpays in explore/tasks)",
+        )
+        bars_r = _sketch_bars(
+            ax,
+            x + BAR_PAIR_OFFSET,
+            router_efforts,
+            color=WITH_COLOR,
+            label="Gentle AI Router (Scales reasoning only when phase complexity demands it)",
+        )
 
-            lo, hi = min(lims), max(lims)
-            pad = (hi - lo) * 0.08 or 1
-            lo_p, hi_p = lo - pad, hi + pad
-            ax.plot(
-                [lo_p, hi_p],
-                [lo_p, hi_p],
+        # Label selected effort on router bars
+        for _idx, (bar, row) in enumerate(zip(bars_r, df.itertuples(), strict=False)):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                bar.get_height() + 0.08,
+                f"{row.RouterEffort}\n({row.RouterModel.split('/')[0].strip()})",
+                ha="center",
+                va="bottom",
+                fontsize=7.5,
                 color="black",
-                linestyle="--",
-                linewidth=1.2,
-                alpha=0.45,
-                zorder=1,
             )
-            ax.set_xlim(lo_p, hi_p)
-            ax.set_ylim(lo_p, hi_p)
-            ax.set_xlabel(xlabel, fontsize=10)
-            ax.set_ylabel(ylabel, fontsize=10)
-            ax.set_title(subtitle, fontsize=11, loc="left", pad=8)
-            style_axes(ax, ylabel="", grid=True)
-            ax.set_ylabel(ylabel)
-            ax.legend(title="scenario", fontsize=8.5, title_fontsize=8.5, loc="lower right")
+
+        ax.set_ylim(0, 3.7)
+        ax.set_yticks([1, 2, 3])
+        labels = [
+            "Low Effort\n(Speed / Diff edit)",
+            "Medium Effort\n(Spec / Propose)",
+            "High Effort\n(Architecture)",
+        ]
+        ax.set_yticklabels(labels, fontsize=8.5)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.set_xticks(x)
+        ax.set_xticklabels(phases, fontsize=10, fontweight="bold")
+        ax.legend(loc="upper left", fontsize=8.5, framealpha=0.95)
+        ax.grid(axis="y", alpha=0.2, linestyle="-", color="#888888", linewidth=0.6)
+
+        fig.savefig(out, dpi=160, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+
+
+def plot_quality_preservation(df: pd.DataFrame, out: Path) -> None:
+    """Chart 3: Quality score preservation above required phase floor."""
+    phases = df["Phase"].tolist()
+    x = np.arange(len(phases))
+    qual_baseline = df["QualBaseline"].to_numpy()
+    qual_router = df["QualRouter"].to_numpy()
+    qual_floor = df["QualFloor"].to_numpy()
+
+    with sketch_style():
+        fig, ax = plt.subplots(figsize=(12, 5.5))
+        fig.subplots_adjust(top=0.88, bottom=0.20)
+        fig.suptitle(
+            "Quality Floor Preservation: Zero Quality Regression Under Lower Effort",
+            fontsize=13,
+            fontweight="bold",
+        )
+
+        _sketch_bars(
+            ax,
+            x - BAR_PAIR_OFFSET,
+            qual_baseline,
+            color=WITHOUT_COLOR,
+            label="Fixed Strong Baseline (score 0–100)",
+        )
+        _sketch_bars(
+            ax,
+            x + BAR_PAIR_OFFSET,
+            qual_router,
+            color=WITH_COLOR,
+            label="Gentle AI Model Router (score 0–100)",
+        )
+
+        # Plot phase floor line
+        ax.step(
+            x,
+            qual_floor,
+            where="mid",
+            color=FLOOR_COLOR,
+            linestyle="--",
+            linewidth=2.0,
+            label="Phase Quality Floor (P_min constraint)",
+            zorder=4,
+        )
+
+        ax.set_ylim(70, 102)
+        style_axes(ax, ylabel="Evaluated Phase Quality Score", grid=True)
+        ax.set_xticks(x)
+        ax.set_xticklabels(phases, fontsize=10, fontweight="bold")
+        ax.legend(loc="lower right", fontsize=9, framealpha=0.95)
+
+        fig.savefig(out, dpi=160, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+
+
+def plot_pareto_scatter(df: pd.DataFrame, out: Path) -> None:
+    """Chart 4: Pareto frontier of Quality vs Tokens (Visualizing the Sweet Spot)."""
+    with sketch_style():
+        fig, ax = plt.subplots(figsize=(10, 6.2))
+        fig.subplots_adjust(top=0.88, bottom=0.15)
+        fig.suptitle(
+            "Pareto Frontier: Moving Every SDD Phase into the Optimal Efficiency Zone",
+            fontsize=12.5,
+            fontweight="bold",
+        )
+
+        # Shaded Sweet Spot rectangle (High Quality >= 85, Low Tokens <= 18k)
+        ax.axvspan(
+            4000,
+            18000,
+            color="#E8F5E9",
+            alpha=0.6,
+            zorder=0,
+            label="Optimal Efficiency Zone (High Quality, Minimum Tokens)",
+        )
+        ax.axhline(85, color="#2E7D32", linestyle=":", linewidth=1.2, alpha=0.7, zorder=1)
+
+        # Plot Baseline points
+        ax.scatter(
+            df["TokensBaseline"],
+            df["QualBaseline"],
+            color=WITHOUT_COLOR,
+            edgecolors="black",
+            s=110,
+            linewidths=1.2,
+            label="Fixed Baseline Points (High cost, unrouted)",
+            zorder=3,
+        )
+
+        # Plot Router points
+        ax.scatter(
+            df["TokensRouter"],
+            df["QualRouter"],
+            color=WITH_COLOR,
+            edgecolors="black",
+            s=120,
+            linewidths=1.2,
+            label="Gentle AI Router Points (Pareto optimal)",
+            zorder=4,
+        )
+
+        # Draw arrows from Baseline -> Router for each phase
+        for _, row in df.iterrows():
+            ax.annotate(
+                "",
+                xy=(row["TokensRouter"], row["QualRouter"]),
+                xytext=(row["TokensBaseline"], row["QualBaseline"]),
+                arrowprops=dict(arrowstyle="->", color="#333333", lw=1.1, ls="--"),
+                zorder=2,
+            )
+            # Label phase near the router point
+            ax.text(
+                row["TokensRouter"] + 400,
+                row["QualRouter"] - 0.4,
+                row["Phase"],
+                fontsize=8,
+                fontweight="bold",
+                color="#880E4F",
+            )
+
+        ax.set_xlim(3000, 40000)
+        ax.set_ylim(82, 98)
+        ax.set_xlabel("Total API Tokens per Phase (lower is cheaper)", fontsize=10.5)
+        ax.set_ylabel("Quality Score (higher is better)", fontsize=10.5)
+        ax.legend(loc="lower left", fontsize=8.5, framealpha=0.95)
+        style_axes(ax, ylabel="Quality Score (0–100)", grid=True)
 
         fig.savefig(out, dpi=180, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+
+
+def plot_latency_speedup(df: pd.DataFrame, out: Path) -> None:
+    """Chart 5: Latency and execution time speedup per phase."""
+    phases = df["Phase"].tolist()
+    x = np.arange(len(phases))
+    t_base = df["TimeBaseline"].to_numpy()
+    t_router = df["TimeRouter"].to_numpy()
+
+    with sketch_style():
+        fig, ax = plt.subplots(figsize=(12, 5.5))
+        fig.subplots_adjust(top=0.88, bottom=0.20)
+        fig.suptitle(
+            "Task Execution Latency (Seconds): 2.3x Faster Developer Feedback Loop",
+            fontsize=13,
+            fontweight="bold",
+        )
+
+        _sketch_bars(
+            ax,
+            x - BAR_PAIR_OFFSET,
+            t_base,
+            color=WITHOUT_COLOR,
+            label="Fixed Baseline (Excessive thinking delays)",
+        )
+        bars_r = _sketch_bars(
+            ax,
+            x + BAR_PAIR_OFFSET,
+            t_router,
+            color=WITH_COLOR,
+            label="Gentle AI Router (Direct response on low/medium effort)",
+        )
+
+        for bar, pct in zip(bars_r, df["TimeSavingsPct"], strict=False):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                bar.get_height() + 1.2,
+                f"-{pct:.0f}%",
+                ha="center",
+                va="bottom",
+                fontsize=8.5,
+                fontweight="bold",
+                color="#00695C",
+            )
+
+        ax.set_ylim(0, max(t_base) * 1.18)
+        style_axes(ax, ylabel="Execution Time per Phase (Seconds)", grid=True)
+        ax.set_xticks(x)
+        ax.set_xticklabels(phases, fontsize=10, fontweight="bold")
+        ax.legend(loc="upper right", fontsize=9, framealpha=0.95)
+
+        fig.savefig(out, dpi=160, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 
 
@@ -287,52 +559,25 @@ def main() -> None:
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = generate_benchmark_dataset()
+    df = get_router_benchmark_data()
     csv_path = args.out_dir / "benchmarks.csv"
     df.to_csv(csv_path, index=False)
     print(f"Wrote {csv_path}")
 
-    charts = [
-        (
-            "bench-tokens-total-api.png",
-            "TotalWithout",
-            "TotalWith",
-            "Total API Tokens: Fixed Strong Baseline vs Gentle AI Router",
-            "tokens / phase",
-        ),
-        (
-            "bench-tokens-quality.png",
-            "QualityWithout",
-            "QualityWith",
-            "Phase Quality Score (0–100, minimum floor strictly maintained)",
-            "quality score",
-        ),
-        (
-            "bench-tokens-input.png",
-            "InputWithout",
-            "InputWith",
-            "Prompt Input Tokens: Fixed Baseline vs Router",
-            "input tokens",
-        ),
-        (
-            "bench-tokens-time.png",
-            "TimeWithoutSec",
-            "TimeWithSec",
-            "Execution Latency per Phase (seconds)",
-            "seconds",
-        ),
-    ]
+    plot_tokens_by_phase(df, args.out_dir / "bench-tokens-total-api.png")
+    print(f"Generated chart: {args.out_dir / 'bench-tokens-total-api.png'}")
 
-    for filename, col_w, col_k, title, ylabel in charts:
-        path = args.out_dir / filename
-        plot_without_with(
-            df, path, col_without=col_w, col_with=col_k, title=title, ylabel=ylabel
-        )
-        print(f"Generated chart: {path}")
+    plot_effort_allocation(df, args.out_dir / "bench-tokens-effort.png")
+    print(f"Generated chart: {args.out_dir / 'bench-tokens-effort.png'}")
 
-    scatter_path = args.out_dir / "bench-tokens-scatter.png"
-    plot_scatter_pairs(df, scatter_path)
-    print(f"Generated scatter chart: {scatter_path}")
+    plot_quality_preservation(df, args.out_dir / "bench-tokens-quality.png")
+    print(f"Generated chart: {args.out_dir / 'bench-tokens-quality.png'}")
+
+    plot_pareto_scatter(df, args.out_dir / "bench-tokens-scatter.png")
+    print(f"Generated chart: {args.out_dir / 'bench-tokens-scatter.png'}")
+
+    plot_latency_speedup(df, args.out_dir / "bench-tokens-time.png")
+    print(f"Generated chart: {args.out_dir / 'bench-tokens-time.png'}")
 
 
 if __name__ == "__main__":

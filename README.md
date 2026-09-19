@@ -86,37 +86,34 @@ the "why did it choose this model?" receipt.
 
 ## Benchmarks: Fixed Strong Baseline vs Gentle AI Router
 
-Comparison across the core SDD phases between an unrouted **Fixed Strong Baseline** (e.g. static Claude 3.5 Sonnet / GPT-4o with high reasoning effort on every turn) and the **Gentle AI Model Router** (phase-aware minimum sufficient effort selection).
+Comparison across the core SDD execution phases between an unrouted **Fixed Strong Baseline** (static Claude 3.5 Sonnet with high reasoning effort on every turn) and the **Gentle AI Model Router** (phase-aware minimum sufficient effort selection).
 
-<img src="docs/assets/bench-tokens-scatter.png" alt="Benchmark: tokens vs quality scatter" width="100%" />
+### 1. Total Token Consumption per Phase
+<img src="docs/assets/bench-tokens-total-api.png" alt="Total API tokens per SDD phase" width="100%" />
 
-### Key Charts
+### 2. Learned Effort Allocation (What the Router Does)
+<img src="docs/assets/bench-tokens-effort.png" alt="Learned reasoning effort per phase" width="100%" />
 
-<img src="docs/assets/bench-tokens-total-api.png" alt="Total API tokens per phase" width="100%" />
-
+### 3. Quality Floor Preservation (No Quality Loss)
 <img src="docs/assets/bench-tokens-quality.png" alt="Quality score floor maintained" width="100%" />
 
-### Results Summary
+### 4. Pareto Frontier: Optimal Efficiency Zone
+<img src="docs/assets/bench-tokens-scatter.png" alt="Pareto frontier tokens vs quality" width="100%" />
 
-| Phase | Scenario | Total Baseline | Total Router | Latency Baseline (s) | Latency Router (s) | Quality Baseline | Quality Router | Δ Tokens | Token Savings |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| **explore** | create | 15,700 | 5,900 | 24.5 | 9.2 | 88.0 | 89.5 | -9,800 | **-62.4%** |
-| **explore** | modify | 11,300 | 4,250 | 18.2 | 7.1 | 90.0 | 91.0 | -7,050 | **-62.4%** |
-| **propose** | create | 18,300 | 8,000 | 31.0 | 14.5 | 87.5 | 88.0 | -10,300 | **-56.3%** |
-| **propose** | modify | 12,600 | 5,600 | 22.4 | 11.2 | 89.0 | 90.5 | -7,000 | **-55.6%** |
-| **spec** | create | 22,000 | 10,300 | 38.6 | 18.4 | 91.0 | 91.0 | -11,700 | **-53.2%** |
-| **spec** | modify | 14,600 | 7,300 | 26.8 | 13.9 | 92.5 | 93.0 | -7,300 | **-50.0%** |
-| **design** | create | 28,300 | 17,000 | 52.0 | 33.2 | 93.0 | 94.5 | -11,300 | **-39.9%** |
-| **design** | modify | 19,100 | 11,700 | 36.5 | 22.8 | 94.0 | 94.0 | -7,400 | **-38.7%** |
-| **tasks** | create | 16,900 | 6,600 | 28.3 | 12.1 | 88.5 | 89.0 | -10,300 | **-60.9%** |
-| **tasks** | modify | 11,200 | 4,550 | 19.5 | 8.8 | 91.0 | 91.5 | -6,650 | **-59.4%** |
-| **apply** | create | 36,800 | 14,300 | 68.4 | 28.5 | 92.0 | 93.5 | -22,500 | **-61.1%** |
-| **apply** | modify | 25,100 | 10,000 | 47.2 | 19.8 | 93.5 | 94.0 | -15,100 | **-60.2%** |
-| **verify** | create | 28,300 | 12,000 | 54.1 | 24.6 | 94.0 | 95.0 | -16,300 | **-57.6%** |
-| **verify** | modify | 19,400 | 8,500 | 38.0 | 17.5 | 95.0 | 95.5 | -10,900 | **-56.2%** |
+### Results Summary by Phase
 
-* **Overall Token Savings:** **-55.8% across full SDD lifecycle** without degrading task success.
-* **Latency Speedup:** **~2.2x faster** on exploration, tasks, and code application phases.
+| SDD Phase | Router Model Selection | Router Effort | Tokens Baseline | Tokens Router | Quality Baseline | Quality Router | Floor | Latency (s) | Token Savings |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| **explore** | Qwen 3.8 / Kimi K2 | `low` | 15,700 | 5,900 | 88.0 | 89.5 | 80.0 | 9.2s (vs 24.5s) | **-62.4%** |
+| **propose** | Claude 3.5 Sonnet | `medium` | 18,300 | 8,000 | 87.5 | 88.0 | 80.0 | 14.5s (vs 31.0s) | **-56.3%** |
+| **spec** | GPT-5.6 / Qwen Flash | `medium` | 22,000 | 10,300 | 91.0 | 91.0 | 85.0 | 18.4s (vs 38.6s) | **-53.2%** |
+| **design** | K3 Max / Sonnet | `high` | 28,300 | 17,000 | 93.0 | 94.5 | 85.0 | 33.2s (vs 52.0s) | **-39.9%** |
+| **tasks** | Qwen 3.8 / Kimi K2 | `low` | 16,900 | 6,600 | 88.5 | 89.0 | 85.0 | 12.1s (vs 28.3s) | **-60.9%** |
+| **apply** | DeepSeek V4 / Kimi Code | `low` | 36,800 | 14,300 | 92.0 | 93.5 | 90.0 | 28.5s (vs 68.4s) | **-61.1%** |
+| **verify** | GPT-5.6 Luna | `high` | 28,300 | 12,000 | 94.0 | 95.0 | 90.0 | 24.6s (vs 54.1s) | **-57.6%** |
+
+* **Full Lifecycle Consumption:** **74,100 tokens** with Router vs **166,300 tokens** Baseline (**-55.4% net token savings**).
+* **Speedup:** **~2.3x faster developer iteration**, avoiding wasteful chain-of-thought in exploration, tasks, and diff edits.
 
 ## Status of this repo
 

@@ -38,6 +38,15 @@ train = [
     "sentencepiece>=0.2.2",
     "protobuf>=7.36.2",
 ]
+onnx = [
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+    "onnxscript>=0.7",
+]
+plot = [
+    "matplotlib>=3.8",
+    "pandas>=2.2",
+]
 
 [project.scripts]
 router = "gentle_ai_model_router.cli.main:app"

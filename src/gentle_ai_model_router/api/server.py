@@ -23,6 +23,11 @@ from gentle_ai_model_router.api.schemas import (
 from gentle_ai_model_router.integration import telemetry_shim
 from gentle_ai_model_router.registry import db as registry_db
 from gentle_ai_model_router.registry.fingerprint import registry_fingerprint
+from gentle_ai_model_router.router.bandit import (
+    REASON_UCB,
+    BanditConfig,
+    apply_bandit,
+)
 from gentle_ai_model_router.router.config import RouterConfig
 from gentle_ai_model_router.router.decision import (
     CANONICAL_PHASES,
@@ -37,6 +42,7 @@ from gentle_ai_model_router.router.policy import (
     normalize_phase,
     rank_candidates,
 )
+from gentle_ai_model_router.router.reward import aggregate_rewards, compute_rewards
 
 logger = logging.getLogger(__name__)
 
@@ -220,9 +226,31 @@ def create_app(
                         session, ranking, app.state.ranker, request.task, config
                     )
 
+                if shim_store is not None:
+                    # The bandit consults shim rewards OUTSIDE the registry
+                    # session and must never break routing: any telemetry
+                    # failure falls back to the pre-bandit ranking (same
+                    # convention as _record_decision).
+                    try:
+                        with shim_store.session() as shim_session:
+                            bandit_aggregates = aggregate_rewards(
+                                compute_rewards(shim_session)
+                            )
+                        bandit_result = apply_bandit(
+                            ranking, bandit_aggregates, BanditConfig()
+                        )
+                        if bandit_result.applied:
+                            ranking = bandit_result.ranking
+                    except Exception as exc:  # bandit must never break routing
+                        logger.warning("bandit_consult_failed error=%s", exc)
+
                 winner = ranking.candidates[0]
                 reasons = list(winner.reason_codes)
-                if "neural_ranker:onnx" not in reasons and "cheapest_of_meeting" not in reasons:
+                if (
+                    "neural_ranker:onnx" not in reasons
+                    and REASON_UCB not in reasons
+                    and "cheapest_of_meeting" not in reasons
+                ):
                     reasons.append("cheapest_of_meeting")
 
                 decision = Decision(

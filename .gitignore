@@ -18,3 +18,4 @@ models/
 *.sqlite
 *.sqlite3
 *.db
+.atl/

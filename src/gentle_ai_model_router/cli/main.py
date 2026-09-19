@@ -38,8 +38,10 @@ from gentle_ai_model_router.collector.snapshots import SnapshotRecord, SnapshotS
 from gentle_ai_model_router.integration import gentle_state_adapter as gs
 from gentle_ai_model_router.integration import opencode_adapter as oa
 from gentle_ai_model_router.integration import telemetry_shim
+from gentle_ai_model_router.integration.outcome import apply_outcomes
 from gentle_ai_model_router.registry import db as registry_db
 from gentle_ai_model_router.registry.normalize import Effort
+from gentle_ai_model_router.router.bandit import BanditConfig, bandit_version
 from gentle_ai_model_router.router.config import RouterConfig, load_config
 from gentle_ai_model_router.router.decision import CANONICAL_PHASES, TaskContext
 from gentle_ai_model_router.router.policy import (
@@ -48,6 +50,7 @@ from gentle_ai_model_router.router.policy import (
     rank_candidates,
     select_candidate,
 )
+from gentle_ai_model_router.router.reward import RewardError, aggregate_rewards, compute_rewards
 
 app = typer.Typer(
     name="router",
@@ -64,14 +67,19 @@ gentle_state_app = typer.Typer(
     invoke_without_command=True,
 )
 shim_app = typer.Typer(help="Telemetry shim ingestion.", no_args_is_help=True)
+bandit_app = typer.Typer(help="Bandit reward loop: report + outcome update.", no_args_is_help=True)
 app.add_typer(snapshots_app, name="snapshots")
 app.add_typer(registry_app, name="registry")
 app.add_typer(integrate_app, name="integrate")
 app.add_typer(shim_app, name="shim")
+app.add_typer(bandit_app, name="bandit")
 integrate_app.add_typer(gentle_state_app, name="gentle-state")
 
 console = Console()
 err_console = Console(stderr=True)
+# Data tables (bandit report) need deterministic width under pipes/tests:
+# a plain Console collapses to 80 cols and crops numeric cells.
+bandit_console = Console(width=140)
 
 
 def _load_ctx(
@@ -962,6 +970,123 @@ def shim_ingest(
     with store.session() as session:
         counts = store.ingest_jsonl(session, sys.stdin)
     console.print(json.dumps(counts))
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4: bandit policy loop — outcomes, rewards, bandit inspection
+# --------------------------------------------------------------------------- #
+
+
+def _open_shim(config: RouterConfig, db: str | None) -> telemetry_shim.ShimStore:
+    url = db or config.telemetry_url
+    if "://" not in url:
+        url = f"sqlite:///{url}"  # plain SQLite path → SQLAlchemy URL
+    store = telemetry_shim.ShimStore(url)
+    store.init_schema()
+    return store
+
+
+@bandit_app.command("report")
+def bandit_report(
+    phase: str | None = typer.Option(
+        None, "--phase", help="Filter aggregates to one SDD phase (default: all)."
+    ),
+    db: str | None = typer.Option(None, "--db", help="Telemetry SQLite path override."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Show per-(phase, model, effort) reward aggregates from the telemetry store."""
+    config, _ = _load_ctx(config_path, data_dir)
+    store = _open_shim(config, db)
+    try:
+        with store.session() as session:
+            aggregates = aggregate_rewards(compute_rewards(session))
+    except RewardError as exc:
+        err_console.print(f"[red]error: {exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    if phase is not None:
+        name = phase.removeprefix("sdd-")
+        aggregates = [a for a in aggregates if a.phase == name]
+    if not aggregates:
+        console.print("no reward data (cold start: the bandit falls back to rank_candidates)")
+        return
+    table = Table(title=f"bandit reward aggregates ({bandit_version(BanditConfig())})")
+    for column in (
+        "phase", "model", "effort", "executions", "success", "mean reward",
+        "mean tokens", "tokens/success", "win rate",
+    ):
+        numeric = column in {"executions", "success", "mean reward", "mean tokens",
+                             "tokens/success", "win rate"}
+        table.add_column(
+            column,
+            justify="right" if numeric else "left",
+            no_wrap=column in {"model", "effort", "phase"},
+        )
+    for agg in aggregates:
+        table.add_row(
+            agg.phase,
+            agg.model,
+            agg.effort,
+            str(agg.executions),
+            f"{agg.success_rate:.3f}",
+            f"{agg.mean_reward:.4f}",
+            f"{agg.mean_total_tokens:.0f}",
+            f"{agg.tokens_per_success:.0f}" if agg.tokens_per_success is not None else "-",
+            f"{agg.win_rate:.3f}" if agg.win_rate is not None else "-",
+        )
+    bandit_console.print(table)
+
+
+@bandit_app.command("update")
+def bandit_update(
+    phase: str | None = typer.Option(
+        None, "--phase", help="Restrict outcome scoring to one SDD phase."
+    ),
+    db: str | None = typer.Option(None, "--db", help="Telemetry SQLite path override."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Recompute NULL execution outcomes via the rubric; print the bandit version.
+
+    Idempotent: executions already carrying task_success are never touched.
+    """
+    config, _ = _load_ctx(config_path, data_dir)
+    store = _open_shim(config, db)
+    with store.session() as session:
+        counts = apply_outcomes(session, phase=phase)
+    table = Table(title="bandit update")
+    table.add_row("outcomes_scored", str(counts["scored"]))
+    table.add_row("bandit_version", bandit_version(BanditConfig()))
+    console.print(table)
+
+
+@app.command()
+def feedback(
+    db: str | None = typer.Option(None, "--db", help="Telemetry SQLite path override."),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Ingest execution JSON-lines from stdin and score their outcomes.
+
+    Feeds the bandit loop: ingest (idempotent upsert on execution_id) then
+    rubric-scoring of any rows still missing task_success/quality_score.
+    """
+    config, _ = _load_ctx(config_path, data_dir)
+    store = _open_shim(config, db)
+    with store.session() as session:
+        ingest_counts = store.ingest_jsonl(session, sys.stdin)
+        outcome_counts = apply_outcomes(session)
+    # Plain print: the JSON payload must survive piping unwrapped/unmangled
+    # (rich would word-wrap it at the console width and parse markup).
+    print(
+        json.dumps(
+            {
+                "ingested": ingest_counts,
+                "outcomes": outcome_counts,
+                "bandit_version": bandit_version(BanditConfig()),
+            }
+        )
+    )
 
 
 # --------------------------------------------------------------------------- #

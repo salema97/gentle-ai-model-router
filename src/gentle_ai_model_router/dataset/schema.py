@@ -11,6 +11,7 @@ can mistake priors for measured outcomes.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -42,6 +43,23 @@ MODEL_FEATURE_NAMES: tuple[str, ...] = (
     "tps_proxy",  # 0.0 = no speed data / no speed_benchmark configured
 )
 BENCHMARK_FEATURE_SUFFIX_MISSING = "__missing"
+
+
+def derive_label_provenance(provenances: Iterable[str]) -> str:
+    """Derive the dataset-level provenance string from per-row values.
+
+    One derivation shared by the manifest, training metrics, and evaluation
+    results so all consumers report the SAME label provenance: the sorted set
+    of non-empty provenances; a single value passes through, multiple values
+    are joined with ``+``, and an empty set defaults to
+    :data:`PROVENANCE_BOOTSTRAP` (the historical bootstrap-only default).
+    """
+    unique = sorted({p for p in provenances if p})
+    if not unique:
+        return PROVENANCE_BOOTSTRAP
+    if len(unique) == 1:
+        return unique[0]
+    return "+".join(unique)
 
 
 @dataclass(frozen=True)
@@ -139,13 +157,7 @@ class DatasetV1:
         return counts
 
     def manifest(self) -> dict[str, Any]:
-        provenances = sorted({e.label_provenance for e in self.examples if e.label_provenance})
-        if not provenances:
-            label_prov = PROVENANCE_BOOTSTRAP
-        elif len(provenances) == 1:
-            label_prov = provenances[0]
-        else:
-            label_prov = "+".join(provenances)
+        label_prov = derive_label_provenance(e.label_provenance for e in self.examples)
 
         emitted_telemetry = bool(self.telemetry_stats.get("emitted"))
         manifest = {

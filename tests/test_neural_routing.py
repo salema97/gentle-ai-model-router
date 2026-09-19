@@ -58,12 +58,25 @@ def engine(tmp_path: Path):
 
 
 class MockRanker:
-    """Mock ranker that scores candidates by preferential substring."""
+    """Mock ranker that scores candidates by preferential substring.
 
-    def __init__(self, preferred_model: str = "test/model-b", high_score: float = 0.95) -> None:
+    ``benchmark_feature_names`` emulates the recording training writes into
+    the checkpoint metrics.json and OnnxRanker loads onto the instance:
+    the artifact-driven serving path (router/neural.py) must build the
+    numeric feature vector with EXACTLY these names.
+    """
+
+    def __init__(
+        self,
+        preferred_model: str = "test/model-b",
+        high_score: float = 0.95,
+        benchmark_feature_names: tuple[str, ...] | None = None,
+    ) -> None:
         self.preferred_model = preferred_model
         self.high_score = high_score
+        self.benchmark_feature_names = benchmark_feature_names
         self.call_count = 0
+        self.last_numeric_features: list[list[float]] = []
 
     def score(
         self,
@@ -72,6 +85,7 @@ class MockRanker:
         max_length: int | None = None,
     ) -> list[float]:
         self.call_count += 1
+        self.last_numeric_features = [list(row) for row in numeric_features]
         scores: list[float] = []
         for text in texts:
             if self.preferred_model in text:
@@ -124,6 +138,127 @@ def test_neural_rerank_with_mock(engine, config: RouterConfig) -> None:
         assert "neural_ranker:onnx" in winner.reason_codes
         assert reranked.policy_version == f"{ranking.policy_version}+neural"
         assert len(reranked.candidates) == len(ranking.candidates)
+
+
+# --------------------------------------------------------------------------- #
+# R2: serving feature layout must match the trained dim (artifact-driven names)
+# --------------------------------------------------------------------------- #
+
+
+def _rerank_with_names(engine, config: RouterConfig, names: tuple[str, ...] | None) -> MockRanker:
+    with registry_db.Session(engine) as session:
+        ranking = rank_candidates(session, "explore", config)
+        mock_ranker = MockRanker(benchmark_feature_names=names)
+        reranked = neural_rerank(
+            session=session,
+            ranking=ranking,
+            ranker=mock_ranker,
+            task="Refactor neural pipeline",
+            config=config,
+        )
+    assert reranked.candidates[0].model.canonical_id == "test/model-b"
+    return mock_ranker
+
+
+def test_neural_rerank_with_3_name_artifact(engine, config: RouterConfig) -> None:
+    names3 = (
+        "artificial_analysis_intelligence_index",
+        "lmarena_elo:text",
+        "lmarena_elo:webdev",
+    )
+    mock_ranker = _rerank_with_names(engine, config, names3)
+    assert mock_ranker.call_count == 1
+    # 7 model features + 3 artifact benchmark features.
+    assert all(len(row) == 10 for row in mock_ranker.last_numeric_features)
+
+
+def test_neural_rerank_with_15_name_artifact(engine, config: RouterConfig) -> None:
+    from gentle_ai_model_router.router.neural import DEFAULT_BENCHMARK_NAMES
+
+    mock_ranker = _rerank_with_names(engine, config, DEFAULT_BENCHMARK_NAMES)
+    assert all(len(row) == 22 for row in mock_ranker.last_numeric_features)
+
+
+def test_neural_rerank_fallback_reason_code_when_artifact_lacks_names(
+    engine, config: RouterConfig
+) -> None:
+    """Legacy artifact (no recorded names): fall back to the 15-name default
+    but stamp the winner reason codes with the fallback explicitly."""
+    from gentle_ai_model_router.router.neural import (
+        DEFAULT_BENCHMARK_NAMES,
+        REASON_BENCH_NAMES_FALLBACK,
+        resolve_ranker_benchmark_names,
+    )
+
+    names, source = resolve_ranker_benchmark_names(MockRanker(), config)
+    assert source == "legacy_default"
+    assert names == tuple(DEFAULT_BENCHMARK_NAMES)
+
+    with registry_db.Session(engine) as session:
+        ranking = rank_candidates(session, "explore", config)
+        mock_ranker = MockRanker()  # no benchmark_feature_names recorded
+        reranked = neural_rerank(
+            session=session,
+            ranking=ranking,
+            ranker=mock_ranker,
+            task="Refactor neural pipeline",
+            config=config,
+        )
+    winner = reranked.candidates[0]
+    assert REASON_BENCH_NAMES_FALLBACK in winner.reason_codes
+    assert "neural_ranker:onnx" in winner.reason_codes
+    assert all(len(row) == 22 for row in mock_ranker.last_numeric_features)
+
+
+def test_neural_rerank_artifact_names_no_fallback_reason(engine, config: RouterConfig) -> None:
+    from gentle_ai_model_router.router.neural import REASON_BENCH_NAMES_FALLBACK
+
+    names3 = ("artificial_analysis_intelligence_index", "lmarena_elo:text", "lmarena_elo:webdev")
+    with registry_db.Session(engine) as session:
+        ranking = rank_candidates(session, "explore", config)
+        mock_ranker = MockRanker(benchmark_feature_names=names3)
+        reranked = neural_rerank(
+            session=session,
+            ranking=ranking,
+            ranker=mock_ranker,
+            task="Refactor neural pipeline",
+            config=config,
+        )
+    winner = reranked.candidates[0]
+    assert REASON_BENCH_NAMES_FALLBACK not in winner.reason_codes
+
+
+def test_resolve_ranker_benchmark_names_empty_fails_closed(config: RouterConfig) -> None:
+    """An artifact that records names but cannot provide a usable list must
+    fail closed, not serve with a zero-width feature vector."""
+    from gentle_ai_model_router.router.neural import resolve_ranker_benchmark_names
+
+    with pytest.raises(ValueError, match="empty benchmark_feature_names"):
+        resolve_ranker_benchmark_names(MockRanker(benchmark_feature_names=()), config)
+
+
+def test_onnx_ranker_loads_benchmark_feature_names(tmp_path: Path) -> None:
+    """OnnxRanker exposes the names training recorded in metrics.json; legacy
+    artifacts without the recording get None (fallback decided by neural.py)."""
+    import json
+
+    from gentle_ai_model_router.training.onnx_export import load_benchmark_feature_names
+
+    # No metrics.json at all -> legacy artifact.
+    assert load_benchmark_feature_names(tmp_path) is None
+
+    names = ["aa_index", "lmarena_elo:text"]
+    (tmp_path / "metrics.json").write_text(
+        json.dumps({"benchmark_feature_names": names}), encoding="utf-8"
+    )
+    assert load_benchmark_feature_names(tmp_path) == tuple(names)
+
+    # Key present but unusable -> fail closed.
+    (tmp_path / "metrics.json").write_text(
+        json.dumps({"benchmark_feature_names": []}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="invalid benchmark_feature_names"):
+        load_benchmark_feature_names(tmp_path)
 
 
 def test_neural_rerank_noop_without_task(engine, config: RouterConfig) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,41 @@ def _require_onnx_extra() -> None:
         raise RuntimeError(
             "onnx export requires the [onnx] extra: pip install 'gentle-ai-model-router[onnx]'"
         ) from exc
+
+
+def load_benchmark_feature_names(checkpoint: str | Path) -> tuple[str, ...] | None:
+    """Read ``benchmark_feature_names`` recorded by training in metrics.json.
+
+    Training writes the exact benchmark feature vector layout into the
+    checkpoint's metrics.json so serving (router/neural.py) builds numeric
+    features with the SAME names — and therefore the same width — the ranker
+    was trained on.
+
+    Returns None when the artifact predates the recording (the caller decides
+    on a legacy fallback). Raises ValueError on a present-but-invalid
+    recording: a malformed artifact must fail closed, never serve silently
+    with a mismatched feature vector.
+    """
+    metrics_path = Path(checkpoint) / "metrics.json"
+    if not metrics_path.is_file():
+        return None
+    try:
+        data = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"invalid metrics.json in {checkpoint}: {exc}") from exc
+    names = data.get("benchmark_feature_names")
+    if names is None:
+        return None
+    if (
+        not isinstance(names, list)
+        or not names
+        or not all(isinstance(n, str) and n for n in names)
+    ):
+        raise ValueError(
+            f"invalid benchmark_feature_names in {metrics_path}: {names!r} "
+            "(expected a non-empty list of non-empty strings)"
+        )
+    return tuple(names)
 
 
 def export_onnx(
@@ -89,6 +125,13 @@ def export_onnx(
             tokenizer.save_pretrained(out_dir)
         except Exception as exc:
             logger.warning("Could not copy tokenizer to %s: %s", out_dir, exc)
+        # Carry the recorded feature layout so the exported artifact is
+        # self-describing for serving (router/neural.py).
+        metrics_src = ckpt_path / "metrics.json"
+        if metrics_src.is_file():
+            (out_dir / "metrics.json").write_text(
+                metrics_src.read_text(encoding="utf-8"), encoding="utf-8"
+            )
 
     if quantize:
         # Strip value_info so quantize_dynamic won't fail shape inference
@@ -152,6 +195,9 @@ class OnnxRanker:
 
         self.checkpoint = actual_ckpt_dir
         self.model_path = actual_model_path
+        # Feature layout recorded by training (None for legacy artifacts that
+        # predate the recording — neural.py falls back with a reason code).
+        self.benchmark_feature_names = load_benchmark_feature_names(actual_ckpt_dir)
 
         if providers is None:
             providers = ["CPUExecutionProvider"]

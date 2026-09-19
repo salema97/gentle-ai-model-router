@@ -29,10 +29,73 @@ from gentle_ai_model_router.dataset.builder import load_dataset
 from gentle_ai_model_router.dataset.schema import (
     FEATURE_SCHEMA_VERSION,
     NORMALIZATION_VERSION,
+    PROVENANCE_TELEMETRY,
+    derive_label_provenance,
 )
 from gentle_ai_model_router.router.config import RouterConfig, TrainingConfig
 
 logger = logging.getLogger(__name__)
+
+
+def example_loss_weights(
+    examples: list[Any],
+    telemetry_weight: float,
+) -> list[float] | None:
+    """Per-example pointwise loss weights, or None when uniform.
+
+    ``telemetry_weight`` multiplies the loss contribution of
+    ``label_provenance='telemetry'`` examples; everything else keeps weight
+    1.0. Returns None when no example would deviate from 1.0 (including
+    ``telemetry_weight == 1.0``): callers then use the plain mean MSE, which
+    is byte-identical to the pre-weighting behavior.
+    """
+    if telemetry_weight == 1.0:
+        return None
+    weights = [
+        telemetry_weight if getattr(e, "label_provenance", None) == PROVENANCE_TELEMETRY else 1.0
+        for e in examples
+    ]
+    if all(w == 1.0 for w in weights):
+        return None
+    return weights
+
+
+def collate_pointwise(
+    rows: list[Any],
+    tokenizer: Any,
+    model_feature_names: tuple[str, ...],
+    max_length: int,
+    telemetry_weight: float,
+) -> dict[str, Any]:
+    """Pointwise batch: tokenized features + labels + optional loss weights.
+
+    A ``loss_weights`` tensor is added only when telemetry weighting is
+    active (see :func:`example_loss_weights`); otherwise the batch is exactly
+    what :func:`collate_examples` produces.
+    """
+    from gentle_ai_model_router.training.model import collate_examples
+
+    batch = collate_examples(rows, tokenizer, model_feature_names, max_length)
+    weights = example_loss_weights(rows, telemetry_weight)
+    if weights is not None:
+        import torch
+
+        batch["loss_weights"] = torch.tensor(weights, dtype=torch.float32)
+    return batch
+
+
+def pointwise_loss(outputs: Any, labels: Any, loss_weights: Any = None) -> Any:
+    """MSE loss; ``loss_weights`` (when given) re-weights each example.
+
+    With ``loss_weights=None`` this is exactly ``F.mse_loss(outputs, labels)``
+    (mean reduction) — the historical unweighted path.
+    """
+    import torch
+
+    if loss_weights is None:
+        return torch.nn.functional.mse_loss(outputs, labels)
+    per_example = torch.nn.functional.mse_loss(outputs, labels, reduction="none")
+    return (per_example * loss_weights).mean()
 
 
 def _git_commit() -> str:
@@ -77,10 +140,7 @@ def train(
         ) from exc
 
     from gentle_ai_model_router.training.device import resolve_device
-    from gentle_ai_model_router.training.model import (
-        build_model,
-        collate_examples,
-    )
+    from gentle_ai_model_router.training.model import build_model
     from gentle_ai_model_router.training.model_pairwise import (
         build_pairwise_model,
         collate_pairs,
@@ -117,18 +177,23 @@ def train(
         examples_by_key: dict[str, Any] = {}
 
         def collate(rows: list[Any]) -> dict[str, Any]:
-            return collate_examples(
-                rows, tokenizer, dataset.model_feature_names, training.max_length
+            return collate_pointwise(
+                rows,
+                tokenizer,
+                dataset.model_feature_names,
+                training.max_length,
+                training.telemetry_weight,
             )
 
         def compute_loss(
             model_: Any, inputs: dict[str, Any], return_outputs: bool = False, **kwargs: Any
         ) -> Any:
             labels = inputs.pop("labels")
+            loss_weights = inputs.pop("loss_weights", None)
             outputs = model_(
                 inputs["input_ids"], inputs["attention_mask"], inputs["numeric_features"]
             )
-            loss = torch.nn.functional.mse_loss(outputs, labels)
+            loss = pointwise_loss(outputs, labels, loss_weights)
             return (loss, outputs) if return_outputs else loss
 
     elif training.objective == "pairwise":
@@ -233,7 +298,16 @@ def train(
         "normalization_version": NORMALIZATION_VERSION,
         "dataset": {"name": dataset.name, "version": dataset.version},
         "source_snapshot_ids": dataset.source_snapshot_ids,
-        "label_provenance": "bootstrap_prior",
+        # Truthful provenance: derived from the dataset itself (same rule as
+        # DatasetV1.manifest()), never a hardcoded assumption.
+        "label_provenance": derive_label_provenance(
+            e.label_provenance for e in dataset.examples
+        ),
+        # Feature-name recording: serving (router/neural.py) resolves the
+        # benchmark feature vector from THESE names, so the served numeric
+        # dim always matches the trained dim even for non-15-name datasets.
+        "model_feature_names": list(dataset.model_feature_names),
+        "benchmark_feature_names": list(dataset.benchmark_feature_names),
         "git_commit": _git_commit(),
         "created_at": datetime.now(UTC).isoformat(),
     }

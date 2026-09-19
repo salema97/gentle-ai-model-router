@@ -1588,6 +1588,14 @@ def train(
     device: str | None = typer.Option(
         None, "--device", help="auto | cpu | cuda (default: auto = cuda if available)."
     ),
+    telemetry_weight: float | None = typer.Option(
+        None,
+        "--telemetry-weight",
+        help=(
+            "Pointwise only: loss-weight multiplier for label_provenance='telemetry' "
+            "examples (default: 1.0 = uniform, byte-identical to unweighted)."
+        ),
+    ),
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
 ) -> None:
@@ -1604,10 +1612,17 @@ def train(
         ("batch_size", batch_size),
         ("seed", seed),
         ("device", device),
+        ("telemetry_weight", telemetry_weight),
     ):
         if value is not None:
             overrides[key] = value
     training_cfg = config.training.model_copy(update=overrides)
+    if training_cfg.telemetry_weight <= 0.0:
+        err_console.print(
+            f"[red]error: --telemetry-weight must be > 0 "
+            f"(got {training_cfg.telemetry_weight})[/red]"
+        )
+        raise typer.Exit(code=2)
     if training_cfg.objective not in {"pointwise", "pairwise"}:
         err_console.print(
             f"[red]error: unknown objective '{training_cfg.objective}' "

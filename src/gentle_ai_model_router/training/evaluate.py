@@ -4,11 +4,17 @@ Splits evaluated: ``test`` (date-held-out) and ``temporal_test`` (candidate
 models first seen after the train cutoff) — the two splits that answer
 "does the router generalize across TIME and across UNSEEN MODELS".
 
-⚠ BOOTSTRAP-LABEL CAVEAT (docs/evaluation.md): every metric here is computed
-against ``label_utility`` values that are PRIORS from external benchmarks,
-not measured task success. These numbers measure internal consistency with
-the prior model — useful to catch regressions and rank routers RELATIVE to
-each other, meaningless as absolute production-quality estimates.
+⚠ BOOTSTRAP-LABEL CAVEAT (docs/evaluation.md): metrics are computed against
+``label_utility`` values that are PRIORS from external benchmarks, not
+measured task success — except on telemetry-provenance rows, which carry
+MEASURED outcomes. These numbers measure internal consistency with the prior
+model — useful to catch regressions and rank routers RELATIVE to each other,
+meaningless as absolute production-quality estimates.
+
+Token metrics use MEASURED tokens (``cost_features["actual_total_tokens"]``)
+whenever a row carries them (telemetry rows) and estimates
+(``est_total_tokens``) otherwise; the results doc counts the mix so consumers
+know how much of each they are looking at.
 """
 
 from __future__ import annotations
@@ -21,7 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from gentle_ai_model_router.dataset.builder import load_dataset
-from gentle_ai_model_router.dataset.schema import DatasetExample, DatasetV1
+from gentle_ai_model_router.dataset.schema import (
+    DatasetExample,
+    DatasetV1,
+    derive_label_provenance,
+)
 from gentle_ai_model_router.router.config import RouterConfig
 from gentle_ai_model_router.training.baselines import (
     Chooser,
@@ -70,7 +80,18 @@ class GroupOutcome:
         return self.chosen.label_quality_estimate >= self.phase_threshold
 
     @property
+    def has_measured_tokens(self) -> bool:
+        """True when the chosen row carries a measured total-token count."""
+        return self.chosen.cost_features.get("actual_total_tokens") is not None
+
+    @property
     def tokens(self) -> float:
+        """Tokens for cost metrics: MEASURED when available (telemetry rows
+        with ``actual_total_tokens``), estimated (``est_total_tokens``)
+        otherwise."""
+        actual = self.chosen.cost_features.get("actual_total_tokens")
+        if actual is not None:
+            return float(actual)
         return self.chosen.cost_features["est_total_tokens"]
 
     @property
@@ -121,16 +142,20 @@ def evaluate_routers(
             dataset, *ranker, batch_size=batch_size, device=device
         )
 
+    label_provenance = derive_label_provenance(e.label_provenance for e in dataset.examples)
     results: dict[str, Any] = {
         "splits": {},
         "chooser_errors": [],
-        "label_provenance": "bootstrap_prior",
+        "label_provenance": label_provenance,
         "caveat": (
-            "Metrics are computed against bootstrap_prior labels (bootstrap "
-            "PRIORS from external benchmarks), not ground truth telemetry. "
+            f"Metrics are computed against {label_provenance} labels. "
+            "Bootstrap-prior rows are PRIORS from external benchmarks, not "
+            "ground truth telemetry; telemetry rows carry MEASURED outcomes. "
             "Compare routers relative to each other only."
         ),
     }
+    measured_token_rows = 0
+    estimated_token_rows = 0
     for split in EVALUATED_SPLITS:
         examples = [e for e in dataset.examples if e.split == split]
         if not examples:
@@ -149,6 +174,15 @@ def evaluate_routers(
             if metrics is not None:
                 split_result[name] = metrics
         results["splits"][split] = split_result
+        # Token-metric mix for this split's rows: measured (telemetry,
+        # actual_total_tokens present) vs estimated (est_total_tokens).
+        for example in examples:
+            if example.cost_features.get("actual_total_tokens") is not None:
+                measured_token_rows += 1
+            else:
+                estimated_token_rows += 1
+    results["measured_token_rows"] = measured_token_rows
+    results["estimated_token_rows"] = estimated_token_rows
     return results
 
 

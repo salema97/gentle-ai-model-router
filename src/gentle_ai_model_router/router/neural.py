@@ -16,6 +16,8 @@ from gentle_ai_model_router.registry.models import ModelBenchmark, ModelPrice
 from gentle_ai_model_router.router.config import RouterConfig
 from gentle_ai_model_router.router.policy import CandidateRanking, RankedCandidate
 
+# Legacy fallback for ONNX artifacts that predate benchmark_feature_names
+# recording in metrics.json (the historical fixed 15-name training layout).
 DEFAULT_BENCHMARK_NAMES: tuple[str, ...] = (
     "artificial_analysis_intelligence_index",
     "lmarena_elo:text",
@@ -34,6 +36,40 @@ DEFAULT_BENCHMARK_NAMES: tuple[str, ...] = (
     "telemetry_success_rate:verify",
 )
 
+# Reason code stamped on the winner when the ranker artifact carries no
+# recorded benchmark_feature_names and the legacy 15-name default was used.
+REASON_BENCH_NAMES_FALLBACK = "neural_ranker:default_benchmark_names"
+
+
+def resolve_ranker_benchmark_names(
+    ranker: Any,
+    config: RouterConfig,
+) -> tuple[tuple[str, ...], str]:
+    """Benchmark feature names the SERVING path must build, from the artifact.
+
+    Training records ``benchmark_feature_names`` in the checkpoint's
+    metrics.json; :class:`OnnxRanker` loads them onto
+    ``ranker.benchmark_feature_names``. Serving MUST use the artifact's names
+    so the numeric feature width matches the trained dim — a ranker trained
+    on a 3-name dataset (real-v1 style) would silently get garbage features
+    from a hardcoded 15-name list.
+
+    Returns ``(names, source)``: source is ``"artifact"`` when the ranker
+    carries recorded names, ``"legacy_default"`` when falling back to the
+    historical 15-name default (pre-recording artifacts). An artifact that
+    records names but cannot provide a usable list fails closed with a clear
+    error instead of serving with a mismatched feature vector.
+    """
+    names = getattr(ranker, "benchmark_feature_names", None)
+    if names is not None:
+        if not names:
+            raise ValueError(
+                "ranker artifact records an empty benchmark_feature_names list; "
+                "refusing to build a zero-width benchmark feature vector"
+            )
+        return tuple(names), "artifact"
+    return tuple(get_configured_benchmark_names(config)), "legacy_default"
+
 
 def get_configured_benchmark_names(config: RouterConfig) -> list[str]:
     """Collect benchmark names across all configured phases in alphabetical order (15 keys)."""
@@ -49,25 +85,27 @@ def build_candidate_features(
     session: Session,
     candidates: list[RankedCandidate],
     config: RouterConfig,
+    benchmark_names: tuple[str, ...] | list[str] | None = None,
 ) -> list[list[float]]:
-    """Build 22-dimensional numeric feature vector for each candidate.
+    """Build the numeric feature vector for each candidate.
 
-    Features per candidate (22):
-      7 model features:
-        - log10(context_window)
-        - log10(max_output)
-        - input_price
-        - output_price
-        - 1.0 if tool_calling else 0.0
-        - 1.0 if structured_output else 0.0
-        - latency_penalty
-      15 benchmark features:
-        - normalized or raw score for each benchmark key in alphabetical order (0.0 if missing).
+    Features per candidate: 7 model features (context window, max output,
+    prices, tool_calling, structured_output, latency_penalty) + one benchmark
+    feature per name in ``benchmark_names`` (raw registry score, 0.0 if
+    missing). When ``benchmark_names`` is None the configured phase weights
+    (or the legacy 15-name default) are used; neural reranking passes the
+    ranker ARTIFACT's recorded names so the width matches the trained dim.
     """
     if not candidates:
         return []
 
-    benchmark_names = get_configured_benchmark_names(config)
+    if benchmark_names is None:
+        benchmark_names = get_configured_benchmark_names(config)
+    if not benchmark_names:
+        raise ValueError(
+            "benchmark_names must be a non-empty sequence; refusing to build "
+            "a zero-width benchmark feature vector"
+        )
 
     model_ids = {c.model.id for c in candidates}
     deployment_ids = {c.deployment.id for c in candidates}
@@ -173,7 +211,10 @@ def neural_rerank(
         return ranking
 
     candidates_to_score = list(ranking.candidates[:max_candidates])
-    features = build_candidate_features(session, candidates_to_score, config)
+    benchmark_names, names_source = resolve_ranker_benchmark_names(ranker, config)
+    features = build_candidate_features(
+        session, candidates_to_score, config, benchmark_names=benchmark_names
+    )
     texts = [
         (
             f"[phase] {ranking.phase}\n"
@@ -190,6 +231,11 @@ def neural_rerank(
 
     winner_orig, winner_score = scored[0]
     winner_reasons = tuple(winner_orig.reason_codes) + ("neural_ranker:onnx",)
+    if names_source == "legacy_default":
+        # Backward compat: the artifact predates benchmark_feature_names
+        # recording; the fixed 15-name default was used. Stamp it so the
+        # serving decision carries the fallback explicitly.
+        winner_reasons += (REASON_BENCH_NAMES_FALLBACK,)
     new_winner = dataclasses.replace(
         winner_orig,
         score=round(float(winner_score), 6),

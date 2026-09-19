@@ -230,6 +230,11 @@ class TrainingConfig(BaseModel):
     max_length: int = 512
     seed: int = 42
     device: DeviceSetting = "auto"  # auto = cuda when available, else cpu
+    # Pointwise objective only: loss-weight multiplier applied to
+    # label_provenance='telemetry' examples. 1.0 = uniform weighting
+    # (byte-identical to the pre-weighting behavior); >1 upweights measured
+    # outcomes relative to bootstrap priors. The pairwise path ignores this.
+    telemetry_weight: float = 1.0
 
 
 class EvaluationConfig(BaseModel):

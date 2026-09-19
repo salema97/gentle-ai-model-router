@@ -39,7 +39,8 @@ Gentle AI integration evidence: `docs/gentle-ai-integration-research.md`.
 | 2b | ModernBERT ranker training + offline evaluation harness; escalation ladder (labels = bootstrap priors, NOT ground truth — see docs/training.md) | ✅ done |
 | 3 | Telemetry collector shim | ✅ done |
 | 3a | FastAPI `/route` server + policy inspection CLI (`policy`/`explain`/`export`) | ✅ done |
-| 4 | Bandit/policy loop on telemetry; Pi + Codex adapters | pending |
+| 4 | Bandit/policy loop on telemetry (outcome rubric → rewards → constrained UCB over threshold-meeting arms; cold start byte-identical to the deterministic policy); Pi + Codex adapters (state-file route) | ✅ done |
+| 4a | Runtime hook plugins feeding the shim (OpenCode `message.updated`/`SubagentStop`, Pi `turn_context`) | pending |
 | 5 | ModernBERT phase/context ranker retrained on telemetry; threshold tuning; learned-policy promotion workflow | pending |
 
 ## Quickstart
@@ -82,7 +83,10 @@ backup-first and atomic.
 
 Every POST `/route` decision is also persisted to the telemetry shim
 (`api.shim_db_path`, default `data/telemetry.sqlite`) with its reason codes —
-the "why did it choose this model?" receipt.
+the "why did it choose this model?" receipt. Scored executions feed the
+constrained bandit (`router bandit report|update`, `router feedback`), and the
+dataset bridge (`router build-dataset --telemetry-db ...`) emits
+telemetry-provenance training rows for phase 5.
 
 ## Benchmarks: Fixed Strong Baseline vs Gentle AI Router
 

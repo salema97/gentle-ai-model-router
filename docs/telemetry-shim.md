@@ -1,7 +1,10 @@
 # Telemetry Shim — router-owned instrumentation
 
-**Status**: skeleton (Phase 1b). Store + ingestion live; hook plugins and the
-per-phase scoring rubric are DESIGN/pending.
+**Status**: live (Phase 4). Store, ingestion, the per-phase outcome rubric, and
+reward/bandit consumption are implemented; runtime hook plugins
+(OpenCode `message.updated`/`SubagentStop`, Pi `turn_context`) remain
+DESIGN/pending — executions currently arrive via `router shim ingest` /
+`router feedback`.
 
 ## Why not Gentle AI's telemetry store
 
@@ -58,12 +61,25 @@ affect this store.
 Local-only SQLite. No prompt content, no diffs, no transcripts — tokens,
 counters, durations, and phase outcomes only.
 
-## Outcome population (DESIGN/pending)
+## Outcome population (implemented, Phase 4)
 
-`task_success` / `quality_score` will be populated from phase-specific signals
-(`PHASE_SIGNALS` in `integration/telemetry_shim.py` documents the expected
-fields per phase): tests for `apply`/`verify` (tests_passed/failed, build
-green), findings quality for `explore` (count + corroborated ratio), spec
-coverage for `spec`, etc. The per-phase scoring rubric — exact formulas and
-thresholds — is DESIGN/pending and must be specified before the dataset
-builder consumes these columns.
+`task_success` / `quality_score` are populated by the per-phase rubric in
+`integration/outcome.py` (`score_execution`, driven by the `PHASE_SIGNALS`
+expectations): tests for `apply`/`verify` (tests_passed/failed plus tool-error
+and build gates), heuristic deductions from tool_errors / escalation_count /
+latency for `explore`/`propose`/`spec`/`design`/`tasks`, with caller-provided
+outcomes always winning. Entry points:
+
+- `router feedback` — ingest executions JSONL through the shim and score
+  outcomes in one pass (machine-readable JSON summary).
+- `router bandit update` — idempotently backfill NULL `task_success` /
+  `quality_score` rows already in the store.
+
+Rewards are then computed by `router/reward.py` (decision↔execution joins,
+per-arm aggregates: success rate, tokens_per_success, win rate vs
+alternatives) and consumed by the constrained bandit in `router/bandit.py`,
+which reorders only threshold-meeting candidates from the deterministic
+policy and falls back byte-identically on cold start. The dataset bridge
+(`dataset/telemetry_bridge.py`) additionally emits
+`label_provenance=telemetry` examples from scored executions for phase 5
+retraining.

@@ -80,8 +80,8 @@ Commit per work unit on a feature branch.
   writes, atomic+backup+rollback, `router integrate pi`)
 - [x] **T7** — Codex adapter ✅ ee2b534 (50 tests; state-file route, underscore
   keys, carriles, total effort map, `router integrate codex`)
-- [ ] **T8** — Docs: update `README.md` roadmap status, `docs/runbook.md`,
-  `docs/telemetry-shim.md` status lines for phase 4 components.
+- [x] **T8** — Docs ✅ (README roadmap 4 done + 4a pending for hook plugins,
+  runbook bandit/pi/codex commands, telemetry-shim status updated)
 
 ## Acceptance criteria
 

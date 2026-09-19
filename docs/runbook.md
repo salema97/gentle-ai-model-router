@@ -103,6 +103,8 @@ gentle-ai sync --sdd-profile-strategy external-single-active
 ```bash
 router integrate status               # opencode config view
 router integrate gentle-state status  # state file view (both must agree)
+router integrate pi status            # gentle-pi models.json view
+router integrate codex status         # codex state-file assignments view
 ```
 
 ## 5. Observe: telemetry + cost-per-success
@@ -111,9 +113,24 @@ router integrate gentle-state status  # state file view (both must agree)
 # ingest execution JSON-lines (from the shim hook) into the telemetry store
 router shim ingest < executions.jsonl
 
+# or ingest AND score outcomes in one pass (rubric -> task_success/quality_score)
+router feedback < executions.jsonl
+
+# refresh rewards from the store and print the bandit version
+router bandit update
+
+# per-(phase, model, effort) reward aggregates the bandit is exploiting
+router bandit report [--phase sdd-apply]
+
 # tokens_per_success is the primary promotion metric (lower is better);
 # it is reported by `router evaluate` per split/router.
 ```
+
+`/route` decisions are already bandit-consulted in-process: when scored
+rewards exist for the phase, candidates inside the deterministic
+threshold-meeting set are reordered by constrained UCB (`bandit:ucb` reason
+code); with no rewards the decision is byte-identical to the deterministic
+policy (`bandit:cold_start_fallback`).
 
 Every `POST /route` decision is persisted with reason codes — the "why this
 model?" receipt. Correlate these with outcomes before trusting any learned
@@ -157,4 +174,6 @@ ranking metrics. A failed comparison exits 1 and keeps the current router.
 |---|---|---|
 | `~/.gentle-ai/state.json` (`model_assignments`) | `router integrate gentle-state` | `gentle-ai sync` |
 | `~/.config/opencode/opencode.json` (unmanaged blocks only) | `router integrate opencode` | OpenCode session start |
+| `~/.pi/gentle-ai/models.json` (or `GENTLE_PI_CONFIG_HOME`) | `router integrate pi` | gentle-pi review routing |
+| `~/.gentle-ai/state.json` (`CodexModelAssignments`, `CodexPhaseModelAssignments`) | `router integrate codex` | `gentle-ai sync` → Codex TOML profiles |
 | `__managed_by: gentle-ai/sdd` blocks | **nobody external — `gentle-ai sync` only** | OpenCode session start |

@@ -62,7 +62,12 @@ class GroupOutcome:
 
     @property
     def success(self) -> bool:
-        return self.chosen.label_utility >= self.phase_threshold
+        # Sufficiency is defined on QUALITY (the "minimum sufficient effort"
+        # contract: pick the cheapest candidate whose quality meets the phase
+        # threshold). Utility (quality minus cost penalties) drives ranking
+        # and regret, not the success bit — otherwise the evaluator would
+        # systematically disagree with the policy's own selection criterion.
+        return self.chosen.label_quality_estimate >= self.phase_threshold
 
     @property
     def tokens(self) -> float:

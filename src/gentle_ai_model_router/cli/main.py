@@ -10,7 +10,7 @@ import json
 import sys
 from contextlib import nullcontext as _nullcontext
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
 import typer
@@ -870,14 +870,12 @@ def evaluate(
     from gentle_ai_model_router.training.evaluate import evaluate_dataset
 
     config, _ = _load_ctx(config_path, data_dir)
-    engine = None
-    if not baselines_only:
-        # The baseline-policy reference needs the registry even when a
-        # checkpoint is evaluated.
-        engine, _eff = registry_db.get_engine_with_fallback(
-            config.database_url, config.sqlite_fallback_url
-        )
-        registry_db.init_schema(engine)
+    # The baseline-policy reference needs the registry in every mode — without
+    # it the most important reference silently disappears from the comparison.
+    engine, _eff = registry_db.get_engine_with_fallback(
+        config.database_url, config.sqlite_fallback_url
+    )
+    registry_db.init_schema(engine)
     try:
         session_ctx = registry_db.Session(engine) if engine is not None else _nullcontext()
         with session_ctx as session:
@@ -921,6 +919,158 @@ def evaluate(
     err_console.print(
         "[yellow]Caveat: labels are bootstrap priors — compare routers relative to"
         " each other only.[/yellow]"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Model promotion: candidate -> evaluate -> compare -> promote (never
+# auto-replace the active router; see docs/training.md "Promotion workflow")
+# --------------------------------------------------------------------------- #
+
+
+def _print_promotion_comparison(comparison: Any, *, dry_run: bool) -> None:
+    from gentle_ai_model_router.training.promote import INFO_METRICS
+
+    table = Table(
+        title=(
+            f"promotion comparison (split: {comparison.split}) — "
+            f"primary {comparison.metric}, lower is better"
+        )
+    )
+    table.add_column("metric")
+    table.add_column("promoted", justify="right")
+    table.add_column("candidate", justify="right")
+    table.add_column("delta", justify="right")
+    table.add_column("note")
+    promoted_values = comparison.promoted_values or {}
+    promoted_label = "- (first promotion)" if comparison.promoted_values is None else None
+
+    def _row(name: str, note: str) -> None:
+        prom = promoted_values.get(name)
+        cand = comparison.candidate_values.get(name)
+        table.add_row(
+            name,
+            f"{prom:.4f}" if prom is not None else (promoted_label or "missing"),
+            f"{cand:.4f}" if cand is not None else "missing",
+            f"{cand - prom:+.4f}" if (prom is not None and cand is not None) else "-",
+            note,
+        )
+
+    primary_note = "primary (lower better)"
+    if comparison.promoted_values is not None:
+        delta = (
+            comparison.candidate_values[comparison.metric]
+            - comparison.promoted_values[comparison.metric]
+        )
+        primary_note += " — improved" if delta < 0 else " — NOT improved"
+    _row(comparison.metric, primary_note)
+    for guardrail in comparison.guardrails:
+        _row(
+            guardrail.metric,
+            f"guardrail (eps abs) — {'holds' if guardrail.ok else 'REGRESSED'}",
+        )
+    table.caption = (
+        "epsilon = absolute guardrail tolerance; ranking metrics "
+        f"({', '.join(INFO_METRICS)}) are informational"
+    )
+    for name in INFO_METRICS:
+        _row(name, "informational")
+    console.print(table)
+    for reason in comparison.reasons:
+        err_console.print(f"[dim]{escape(reason)}[/dim]")
+    decision = comparison.decision.upper()
+    if dry_run:
+        console.print(f"[bold]decision: {decision}[/bold] (dry-run — nothing written)")
+    else:
+        console.print(f"[bold]decision: {decision}[/bold]")
+
+
+@app.command()
+def promote(
+    candidate: str | None = typer.Option(
+        None, "--candidate", help="Candidate checkpoint dir (models/deberta-router/v<N>)."
+    ),
+    dataset: str | None = typer.Option(
+        None, "--dataset", help="Re-evaluate the candidate on this dataset before comparing."
+    ),
+    metric: str = typer.Option(
+        "tokens_per_success", "--metric", help="Primary metric (lower is better)."
+    ),
+    epsilon: float = typer.Option(
+        0.02, "--epsilon", help="Max absolute guardrail regression allowed (default 0.02)."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Decide and print, write nothing."),
+    status: bool = typer.Option(False, "--status", help="Print the current promoted record."),
+    models_dir: str = typer.Option(
+        "models", "--models-dir", help="Models root that holds the promoted/ record."
+    ),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+) -> None:
+    """Promote a checkpoint only if it beats the active router on eval metrics.
+
+    NEVER auto-replaces the active router: candidate -> evaluate -> compare ->
+    promote. Exit codes: 0 = promoted (or dry-run), 1 = comparison says keep,
+    2 = usage/validation errors.
+    """
+    from gentle_ai_model_router.training import promote as promote_mod
+
+    models_root = Path(models_dir)
+    if status:
+        if candidate is not None or dataset is not None:
+            err_console.print("[red]error: --status takes no other action options[/red]")
+            raise typer.Exit(code=2)
+        current = promote_mod.load_promoted(models_root)
+        if current is None:
+            console.print("none")
+            return
+        table = Table(title=f"promoted router ({promote_mod.promoted_dir(models_root)})")
+        for key in (
+            "promoted_checkpoint",
+            "metrics_path",
+            "promotion_reason",
+            "promoted_at",
+            "git_commit",
+            "promoted_by",
+        ):
+            table.add_row(key, str(current["record"].get(key, "-")))
+        console.print(table)
+        return
+
+    if candidate is None:
+        err_console.print("[red]error: --candidate is required (or use --status)[/red]")
+        raise typer.Exit(code=2)
+
+    config = None
+    if dataset is not None:
+        config, _ = _load_ctx(config_path, data_dir)
+    try:
+        outcome = promote_mod.promote_checkpoint(
+            candidate,
+            models_dir=models_root,
+            dataset=dataset,
+            config=config,
+            metric=metric,
+            epsilon=epsilon,
+            dry_run=dry_run,
+        )
+    except promote_mod.PromotionError as exc:
+        err_console.print(f"[red]error: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=2) from exc
+    except (RuntimeError, ValueError) as exc:
+        err_console.print(f"[red]error: {escape(str(exc))}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    _print_promotion_comparison(outcome.comparison, dry_run=dry_run)
+    if outcome.comparison.decision == "keep":
+        err_console.print("[yellow]current router stays active[/yellow]")
+        raise typer.Exit(code=1)
+    if dry_run:
+        return
+    assert outcome.record is not None  # wrote=True implies a record
+    console.print(
+        f"[green]promoted {outcome.record['promoted_checkpoint']} "
+        f"-> {outcome.record_path}[/green]"
     )
 
 

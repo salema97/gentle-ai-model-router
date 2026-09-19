@@ -68,3 +68,59 @@ router evaluate --dataset data/datasets/router-priors/v1 \
 Checkpoints land in `models/deberta-router/v<N>/` with `config.json`,
 `metrics.json`, model + tokenizer, feature schema version, dataset version,
 normalization version, source snapshot ids, git commit and timestamp.
+
+## Promotion workflow
+
+> **NEVER auto-replace the active router.** Training a new checkpoint changes
+> nothing in production. Promotion is an explicit, audited decision:
+> **candidate → evaluate → compare → promote (only if it improves the defined
+> metric set).**
+
+```bash
+# Candidate already carries an "eval" section in metrics.json:
+router promote --candidate models/deberta-router/v2
+
+# Or evaluate fresh on a dataset first (requires: uv sync --extra train):
+router promote --candidate models/deberta-router/v2 \
+  --dataset data/datasets/router-priors/v1
+
+# Decide and print the comparison, write nothing:
+router promote --candidate models/deberta-router/v2 --dry-run
+
+# Show the currently promoted checkpoint (or "none"):
+router promote --status
+```
+
+Rules enforced by `training/promote.py`:
+
+1. **Provenance gate.** The candidate's `metrics.json` must carry
+   `dataset.version`, `source_snapshot_ids` and `label_provenance`; otherwise
+   promotion is refused (exit 2). An untraceable checkpoint must never route
+   production traffic.
+2. **Eval gate.** Without `--dataset`, the checkpoint must already contain an
+   `eval` section with per-split metrics in the shape `training/evaluate.py`
+   produces. Train loss alone is NEVER a promotion criterion.
+3. **Comparison.** Primary metric: `tokens_per_success` (lower is better) on
+   the newest available evaluated split (`temporal_test` > `test` >
+   `validation`). **Guardrails**: `success_rate` and `mean_quality` must not
+   regress beyond `--epsilon` (absolute, default 0.02). Guardrails exist
+   because the primary metric only counts tokens *per success*: a router that
+   silently routes easy tasks could look cheaper while failing more often —
+   the guardrails bound exactly that failure mode. Ranking metrics
+   (`ndcg@5`, `mrr`) are reported as information but do not gate promotion.
+4. **Decision.** Promote only if the primary improves AND guardrails hold.
+   First promotion (nothing promoted yet) always promotes when eval metrics
+   exist. A `KEEP` decision leaves the current router active (exit 1); usage
+   and validation errors exit 2.
+
+On promotion, `models/promoted/` (created on demand; `models/` is gitignored)
+receives an atomic (tmp + rename) write of:
+
+- `promoted.json` — `{promoted_checkpoint, metrics_path, promotion_reason,
+  promoted_at, git_commit, promoted_by: "manual"}`;
+- `metrics.json` — a full **copy** of the promoted checkpoint's `metrics.json`
+  (chosen over a pointer so the record stays self-contained even if the
+  checkpoint dir is later deleted or moved).
+
+Every promotion is therefore reproducible: the record says which checkpoint,
+which metrics, why, when, at which commit, and by whom.

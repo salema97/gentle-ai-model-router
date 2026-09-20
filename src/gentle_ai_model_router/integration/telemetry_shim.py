@@ -111,6 +111,8 @@ def _get_engine(database_url: str) -> Engine:
             parents=True, exist_ok=True
         )
         return create_engine(database_url, connect_args={"check_same_thread": False}, future=True)
+    if database_url.startswith("postgres://"):
+        database_url = "postgresql://" + database_url[len("postgres://"):]
     return create_engine(database_url, future=True)
 
 

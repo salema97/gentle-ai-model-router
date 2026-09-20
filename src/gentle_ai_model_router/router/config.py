@@ -310,6 +310,7 @@ class IntegrateConfig(BaseModel):
 class ShimConfig(BaseModel):
     """Telemetry shim settings."""
 
+    database_url: str | None = None
     database_filename: str = "telemetry.sqlite"
 
 
@@ -406,7 +407,15 @@ class RouterConfig(BaseModel):
 
     @property
     def telemetry_url(self) -> str:
-        """SQLite URL for the telemetry shim store."""
+        """Database URL for the telemetry shim store (PostgreSQL or SQLite)."""
+        if self.shim.database_url:
+            return self.shim.database_url
+        env_url = (
+            os.environ.get("ROUTER_TELEMETRY_URL")
+            or os.environ.get("TELEMETRY_DATABASE_URL")
+        )
+        if env_url:
+            return env_url
         return f"sqlite:///{self.data_dir / self.shim.database_filename}"
 
 

@@ -107,6 +107,12 @@ regress success rate below a configurable threshold).
   └──────────┘ └─────────┘  └────────────┘ └────────────┘
 ```
 
+### Neural Task-Aware Routing Flow (ModernBERT v14)
+
+<img src="assets/neural-routing-flow.png" alt="Neural Routing and Minimum Sufficient Effort Decision Flow" width="100%" />
+
+The neural router executes single-pass inference via ModernBERT v14 (`[phase] ... [task] ... [candidate] ...` cross-encoding + 22D dense features) and applies the **Minimum Sufficient Effort** rule across provider-supported effort levels (`off` -> `low` -> `medium` -> `high` -> `max`) to guarantee the phase quality floor while avoiding reasoning token inflation.
+
 ## Components (scaffold only — no implementation in Phase 0)
 
 | Module | Status | Responsibility | Delivered as |

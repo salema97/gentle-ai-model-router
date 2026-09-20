@@ -16,6 +16,15 @@ personalization signal.
 ## Architecture (target)
 <img src="docs/assets/architecture-target.png" alt="Gentle AI Model Router Architecture" width="100%" />
 
+### How ModernBERT v14 Decides (Model, Effort) per Task
+
+<img src="docs/assets/neural-routing-flow.png" alt="How ModernBERT v14 Decides (Model, Effort) per Task" width="100%" />
+
+The routing pipeline balances task complexity against token expenditure in three continuous stages:
+1. **Task Context & Candidate Ingestion:** Ingests the SDD phase (e.g. `sdd-verify`, quality floor $P_{\min} = 80\%$), user task prompt, and loads active provider deployment candidates from the local registry (`data/router.db`).
+2. **Dense Features & Joint Cross-Encoder:** Combines a 22D dense feature vector (tool calling capabilities, pricing, category benchmark priors) with joint text tokenization (`[phase] ... [task] ... [candidate] ...`). ModernBERT v14 scores candidate affinity and System One non-autoregressive decision primitives (`Choice`, `Score`, `Noul`).
+3. **Minimum Sufficient Effort Policy:** Variants are evaluated along their supported reasoning effort ladder (`off` $\to$ `low` $\to$ `medium` $\to$ `high` $\to$ `max`). Under the Minimum Sufficient Effort rule, the router selects the lowest effort tier that satisfies the phase quality floor, keeping lightweight phases at `off` and elevating to `low`/`medium` reasoning only when task complexity requires it.
+
 Full design: `docs/architecture.md`. Data plan: `docs/data-sources.md`.
 Gentle AI integration evidence: `docs/gentle-ai-integration-research.md`.
 

@@ -332,6 +332,60 @@ function onSubagentStop(event = {}, options = {}) {
   }
 }
 
+/**
+ * Native OpenCode Plugin factory (v1.18.29+).
+ * OpenCode calls this default export function on plugin initialization.
+ */
+const opencodePlugin = async () => {
+  return {
+    event: async ({ event }) => {
+      try {
+        if (!event) return;
+        const type = event.type;
+        const properties = event.properties || {};
+
+        if (type === 'message.updated') {
+          const info = properties.info || {};
+          onMessageUpdated({ message: info, event: properties });
+
+          // When an assistant turn completes, dispatch execution record
+          if (info.role === 'assistant' && Number.isSafeInteger(info.time?.completed)) {
+            const rawAgent = info.agent || info.mode || 'explore';
+            const phase = String(rawAgent).replace(/^sdd-/, '');
+            const model =
+              info.providerID && info.modelID
+                ? `${info.providerID}/${info.modelID}`
+                : info.modelID || 'unknown';
+            const latency =
+              info.time.completed && info.time.created
+                ? info.time.completed - info.time.created
+                : undefined;
+            const tokens = info.tokens || {};
+
+            const payload = createExecutionPayload({
+              phase: phase,
+              model: model,
+              input_tokens: tokens.input,
+              output_tokens: tokens.output,
+              reasoning_tokens: tokens.reasoning,
+              cached_tokens: tokens.cache?.read,
+              latency_ms: latency,
+              tool_errors: info.error ? 1 : 0,
+              task_success: info.error ? 0 : 1,
+            });
+
+            dispatchExecution(payload).catch(() => {});
+          }
+        } else if (type === 'session.idle' || type === 'session.error' || type === 'subagent.stop') {
+          onSubagentStop(properties);
+        }
+      } catch (err) {
+        // Zero-crash guarantee
+      }
+    },
+  };
+};
+
 const plugin = {
   name: 'opencode-router-telemetry',
   version: '1.0.0',
@@ -352,5 +406,12 @@ const plugin = {
   _sessionStore: sessionStore,
 };
 
-module.exports = plugin;
-module.exports.default = plugin;
+for (const [key, value] of Object.entries(plugin)) {
+  if (key !== 'name') {
+    opencodePlugin[key] = value;
+  }
+}
+opencodePlugin.pluginName = plugin.name;
+
+module.exports = opencodePlugin;
+module.exports.default = opencodePlugin;

@@ -183,6 +183,41 @@ function createExecutionPayload(event = {}, accumulated = {}) {
       ? event.tool_errors
       : (Array.isArray(event.tool_errors) ? event.tool_errors.length : (accumulated.tool_errors || 0));
 
+    const testsPassed =
+    event.tests_passed != null
+      ? Number(event.tests_passed)
+      : (accumulated.tests_passed != null ? Number(accumulated.tests_passed) : null);
+  const testsFailed =
+    event.tests_failed != null
+      ? Number(event.tests_failed)
+      : (accumulated.tests_failed != null ? Number(accumulated.tests_failed) : null);
+
+  let taskSuccess =
+    event.task_success != null
+      ? Number(event.task_success)
+      : (accumulated.task_success != null ? Number(accumulated.task_success) : null);
+
+  if (taskSuccess == null) {
+    if (testsFailed != null && testsFailed > 0) {
+      taskSuccess = 0;
+    } else if (testsPassed != null && testsPassed > 0) {
+      taskSuccess = 1;
+    } else if (toolErrors > 2) {
+      taskSuccess = 0;
+    } else {
+      taskSuccess = 1;
+    }
+  }
+
+  let qualityScore =
+    event.quality_score != null
+      ? Number(event.quality_score)
+      : (accumulated.quality_score != null ? Number(accumulated.quality_score) : null);
+
+  if (qualityScore == null && taskSuccess != null) {
+    qualityScore = Math.max(0.0, Math.min(1.0, taskSuccess - (toolErrors * 0.1)));
+  }
+
   return {
     execution_id: executionId,
     session_id: sessionId,
@@ -202,10 +237,10 @@ function createExecutionPayload(event = {}, accumulated = {}) {
     latency_ms: latMs,
     tool_calls: toolCalls,
     tool_errors: toolErrors,
-    tests_passed: event.tests_passed != null ? Number(event.tests_passed) : null,
-    tests_failed: event.tests_failed != null ? Number(event.tests_failed) : null,
-    task_success: event.task_success != null ? Number(event.task_success) : null,
-    quality_score: event.quality_score != null ? Number(event.quality_score) : null,
+    tests_passed: testsPassed,
+    tests_failed: testsFailed,
+    task_success: taskSuccess,
+    quality_score: qualityScore,
     escalation_count: event.escalation_count != null ? Number(event.escalation_count) : 0,
     repo_features: event.repo_features || accumulated.repo_features || null,
     router_version: ROUTER_VERSION,
@@ -231,6 +266,18 @@ function onMessageUpdated(event) {
     if (msg.model && !record.model) record.model = msg.model;
     if (msg.deployment && !record.deployment) record.deployment = msg.deployment;
     if (msg.effort && !record.effort) record.effort = msg.effort;
+
+    const parts = msg.parts || (event.part ? [event.part] : []);
+    if (Array.isArray(parts)) {
+      for (const part of parts) {
+        if (part && (part.type === 'tool' || part.toolName || part.tool_name)) {
+          record.tool_calls += 1;
+          if (part.error || part.isError || part.status === 'error') {
+            record.tool_errors += 1;
+          }
+        }
+      }
+    }
 
     const usage = event.usage || msg.usage || event.tokens || msg.tokens || {};
     const inTok = usage.input_tokens || usage.prompt_tokens || usage.input || 0;
@@ -290,7 +337,10 @@ const plugin = {
   version: '1.0.0',
   hooks: {
     'message.updated': onMessageUpdated,
+    'message.part.updated': onMessageUpdated,
     SubagentStop: onSubagentStop,
+    'agent.stop': onSubagentStop,
+    'subagent.stop': onSubagentStop,
   },
   onMessageUpdated,
   onSubagentStop,

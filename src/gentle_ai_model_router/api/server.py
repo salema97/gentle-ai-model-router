@@ -10,9 +10,11 @@ identical requests against unchanged state yield byte-identical responses.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from sqlalchemy.engine import Engine
 
 from gentle_ai_model_router.api.schemas import (
@@ -31,6 +33,7 @@ from gentle_ai_model_router.integration.outcome import (
 )
 from gentle_ai_model_router.registry import db as registry_db
 from gentle_ai_model_router.registry.fingerprint import registry_fingerprint
+from gentle_ai_model_router.router.analytics import compute_roi
 from gentle_ai_model_router.router.bandit import (
     REASON_UCB,
     apply_bandit,
@@ -476,5 +479,25 @@ def create_app(
             task_success=t_succ,
             quality_score=q_score,
         )
+
+    @app.get("/analytics/roi")
+    def get_roi_analytics(limit: int = 10000) -> dict[str, Any]:
+        """Compute live ROI, cost savings, and phase metrics from telemetry."""
+        if shim_store is None:
+            raise HTTPException(
+                status_code=503, detail="telemetry shim store is not configured"
+            )
+        with shim_store.session() as session:
+            roi = compute_roi(session, limit=limit)
+            return roi.to_dict()
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    def get_dashboard() -> HTMLResponse:
+        """Render the web business ROI and telemetry dashboard."""
+        tpl_path = Path(__file__).resolve().parent.parent / "templates" / "dashboard.html"
+        if not tpl_path.is_file():
+            raise HTTPException(status_code=404, detail="dashboard template not found")
+        html_content = tpl_path.read_text(encoding="utf-8")
+        return HTMLResponse(content=html_content, status_code=200)
 
     return app

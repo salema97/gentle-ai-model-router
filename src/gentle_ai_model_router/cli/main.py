@@ -373,6 +373,158 @@ def collect(
 
 
 @app.command()
+def setup(
+    opencode: bool = typer.Option(
+        True, "--opencode/--no-opencode", help="Install and wire OpenCode runtime telemetry plugin."
+    ),
+    pi: bool = typer.Option(
+        False, "--pi/--no-pi", help="Install and wire Pi runtime telemetry plugin."
+    ),
+    endpoint: str = typer.Option(
+        "https://router.salema.dev/shim/execution",
+        "--endpoint",
+        help="Telemetry ingestion endpoint URL.",
+    ),
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report planned changes without writing."
+    ),
+) -> None:
+    """Zero-touch onboarding: install telemetry plugins and sync local models into registry."""
+    from gentle_ai_model_router.integration.plugin_installer import (
+        install_opencode_plugin,
+        install_pi_plugin,
+    )
+
+    config, store = _load_ctx(config_path, data_dir)
+    table = Table(title="router setup: zero-touch onboarding")
+    table.add_column("component", style="bold cyan")
+    table.add_column("status", style="green")
+    table.add_column("details")
+
+    # 1. OpenCode plugin
+    if opencode:
+        res = install_opencode_plugin(dry_run=dry_run, endpoint_url=endpoint)
+        files_info = ", ".join(f"{f.target_path.name} ({f.status})" for f in res.files)
+        table.add_row(
+            "opencode plugin",
+            "dry-run" if dry_run else ("installed" if res.installed else "skipped"),
+            f"target: {res.target_dir} | {files_info}",
+        )
+
+    # 2. Pi plugin
+    if pi:
+        res = install_pi_plugin(dry_run=dry_run, endpoint_url=endpoint)
+        files_info = ", ".join(f"{f.target_path.name} ({f.status})" for f in res.files)
+        table.add_row(
+            "pi plugin",
+            "dry-run" if dry_run else ("installed" if res.installed else "skipped"),
+            f"target: {res.target_dir} | {files_info}",
+        )
+
+    # 3. Telemetry endpoint
+    table.add_row("telemetry endpoint", "configured", endpoint)
+
+    # 4. Local discovery & normalization
+    local_result = collect_local_candidates(config.data_sources.local_discovery)
+    candidates_count = len(local_result.candidates)
+
+    if not dry_run:
+        engine, _ = registry_db.get_engine_with_fallback(
+            config.database_url, config.sqlite_fallback_url
+        )
+        registry_db.init_schema(engine)
+        with registry_db.Session(engine) as session:
+            applied = registry_db.apply_local_candidates(session, local_result.candidates)
+            session.commit()
+        details = (
+            f"{candidates_count} discovered -> "
+            f"{applied.get('providers', 0)} providers, "
+            f"{applied.get('models', 0)} models, "
+            f"{applied.get('deployments', 0)} deployments, "
+            f"{applied.get('variants', 0)} variants"
+        )
+        table.add_row("local candidate sync", "synchronized", details)
+    else:
+        table.add_row(
+            "local candidate sync",
+            "dry-run",
+            f"{candidates_count} candidates discovered (not written)",
+        )
+
+    console.print(table)
+    if dry_run:
+        console.print(
+            "[yellow]Dry-run complete: no changes were written to disk or database.[/yellow]"
+        )
+    else:
+        console.print(
+            "[bold green]Setup complete! OpenCode is now wired to report "
+            "telemetry and route through active providers.[/bold green]"
+        )
+
+
+@app.command()
+def roi(
+    config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
+    limit: int = typer.Option(10000, "--limit", help="Maximum execution records to analyze."),
+) -> None:
+    """Display business ROI, financial savings vs. frontier models, and latency metrics."""
+    from gentle_ai_model_router.router.analytics import compute_roi
+
+    config, _ = _load_ctx(config_path, data_dir)
+    shim_url = config.telemetry_url
+    shim_store = telemetry_shim.ShimStore(shim_url)
+    shim_store.init_schema()
+
+    with shim_store.session() as session:
+        summary = compute_roi(session, limit=limit)
+
+    kpi_table = Table(title="Gentle AI Model Router: Business ROI Summary")
+    kpi_table.add_column("Metric", style="bold cyan")
+    kpi_table.add_column("Value", style="bold green")
+
+    kpi_table.add_row("Total Executions Tracked", str(summary.total_executions))
+    kpi_table.add_row("Total Tokens Processed", f"{summary.total_tokens:,}")
+    kpi_table.add_row("Actual Cost (Routed)", f"${summary.actual_cost_usd:.4f} USD")
+    kpi_table.add_row(
+        "Frontier Baseline Cost (Claude/GPT-4o)", f"${summary.baseline_cost_usd:.4f} USD"
+    )
+    kpi_table.add_row("Total Net Dollars Saved", f"${summary.total_saved_usd:.4f} USD")
+    kpi_table.add_row("Economic Savings Rate", f"{summary.savings_percentage:.1f}%")
+    kpi_table.add_row("Average Turn Latency", f"{summary.avg_latency_ms:.1f} ms")
+    kpi_table.add_row("Average Latency Saved", f"{summary.latency_saved_ms:.1f} ms")
+    kpi_table.add_row("Overall Task Success Rate", f"{summary.overall_success_rate * 100:.1f}%")
+    console.print(kpi_table)
+
+    if summary.phases:
+        phase_table = Table(title="ROI Breakdown by SDD Phase")
+        phase_table.add_column("Phase", style="bold")
+        phase_table.add_column("Executions", justify="right")
+        phase_table.add_column("Tokens", justify="right")
+        phase_table.add_column("Actual ($)", justify="right")
+        phase_table.add_column("Frontier ($)", justify="right")
+        phase_table.add_column("Saved ($)", justify="right", style="green")
+        phase_table.add_column("Avg Latency", justify="right")
+        phase_table.add_column("Success", justify="right")
+
+        for p in summary.phases:
+            phase_table.add_row(
+                p.phase,
+                str(p.executions),
+                f"{p.total_tokens:,}",
+                f"${p.actual_cost_usd:.4f}",
+                f"${p.baseline_cost_usd:.4f}",
+                f"${p.saved_usd:.4f}",
+                f"{p.avg_latency_ms:.0f} ms",
+                f"{p.success_rate * 100:.1f}%",
+            )
+        console.print(phase_table)
+
+
+@app.command()
 def normalize(
     config_path: str | None = typer.Option(None, "--config", help="Path to router.yaml."),
     data_dir: str | None = typer.Option(None, "--data-dir", help="Override data directory."),
@@ -986,6 +1138,9 @@ def integrate_status(
 def plugins_install(
     opencode: bool = typer.Option(False, "--opencode", help="Install OpenCode hook plugin."),
     pi: bool = typer.Option(False, "--pi", help="Install Pi hook plugin."),
+    endpoint: str | None = typer.Option(
+        None, "--endpoint", help="Telemetry ingestion endpoint URL."
+    ),
     target_dir: str | None = typer.Option(
         None, "--target-dir", help="Target installation directory override."
     ),
@@ -1008,9 +1163,13 @@ def plugins_install(
 
     for target in targets:
         if target == "opencode":
-            res = install_opencode_plugin(target_dir=target_dir, dry_run=dry_run)
+            res = install_opencode_plugin(
+                target_dir=target_dir, dry_run=dry_run, endpoint_url=endpoint
+            )
         else:
-            res = install_pi_plugin(target_dir=target_dir, dry_run=dry_run)
+            res = install_pi_plugin(
+                target_dir=target_dir, dry_run=dry_run, endpoint_url=endpoint
+            )
 
         console.print(f"[bold]{res.plugin_name} plugin[/bold] -> {res.target_dir}")
         for f in res.files:

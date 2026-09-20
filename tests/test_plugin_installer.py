@@ -120,3 +120,40 @@ def test_cli_integrate_plugins_status(tmp_path: Path) -> None:
     assert "Runtime hook plugins status" in result.stdout
     assert "pi" in result.stdout
     assert "installed" in result.stdout
+
+
+def test_install_plugin_with_custom_endpoint(tmp_path: Path) -> None:
+    target = tmp_path / "custom_endpoint_plugins"
+    res = install_opencode_plugin(
+        target_dir=target,
+        endpoint_url="https://router.example.com/shim/execution",
+    )
+    assert res.installed is True
+    js_content = (target / "router_telemetry.js").read_text(encoding="utf-8")
+    assert "const DEFAULT_ENDPOINT = 'https://router.example.com/shim/execution';" in js_content
+
+
+def test_cli_setup_dry_run() -> None:
+    result = runner.invoke(app, ["setup", "--dry-run"])
+    assert result.exit_code == 0
+    assert "router setup: zero-touch onboarding" in result.stdout
+    assert "dry-run" in result.stdout
+
+
+def test_cli_setup_execution(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path))
+    result = runner.invoke(
+        app,
+        [
+            "setup",
+            "--no-pi",
+            "--data-dir",
+            str(tmp_path),
+            "--endpoint",
+            "https://test.salema.dev/shim/execution",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Setup complete" in result.stdout
+    assert "synchronized" in result.stdout
+

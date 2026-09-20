@@ -14,6 +14,7 @@ Guarantees:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from pathlib import Path
 PLUGIN_SRC_DIR = Path(__file__).resolve().parent.parent / "plugins"
 OPENCODE_SRC_DIR = PLUGIN_SRC_DIR / "opencode"
 PI_SRC_DIR = PLUGIN_SRC_DIR / "pi"
+
 
 
 @dataclass(frozen=True)
@@ -110,12 +112,20 @@ def _install_file(
     source_path: Path,
     target_path: Path,
     dry_run: bool = False,
+    endpoint_url: str | None = None,
 ) -> InstalledFileResult:
     """Install a single file with backup-first and atomic write semantics."""
     if not source_path.is_file():
         raise FileNotFoundError(f"Plugin source file not found: {source_path}")
 
     new_content = source_path.read_text(encoding="utf-8")
+    if endpoint_url and source_path.name == "router_telemetry.js":
+        new_content = re.sub(
+            r"const DEFAULT_ENDPOINT = ['\"][^'\"]+['\"];",
+            f"const DEFAULT_ENDPOINT = '{endpoint_url}';",
+            new_content,
+        )
+
     backup_path: Path | None = None
 
     if target_path.is_file():
@@ -159,6 +169,7 @@ def _install_file(
 def install_opencode_plugin(
     target_dir: str | Path | None = None,
     dry_run: bool = False,
+    endpoint_url: str | None = None,
 ) -> PluginInstallResult:
     """Install the OpenCode telemetry runtime hook plugin files."""
     dest = resolve_opencode_plugin_dir(target_dir)
@@ -168,7 +179,7 @@ def install_opencode_plugin(
     for name in file_names:
         src = OPENCODE_SRC_DIR / name
         tgt = dest / name
-        res = _install_file(src, tgt, dry_run=dry_run)
+        res = _install_file(src, tgt, dry_run=dry_run, endpoint_url=endpoint_url)
         results.append(res)
 
     installed = any(r.wrote for r in results) or all(r.status == "unchanged" for r in results)
@@ -183,6 +194,7 @@ def install_opencode_plugin(
 def install_pi_plugin(
     target_dir: str | Path | None = None,
     dry_run: bool = False,
+    endpoint_url: str | None = None,
 ) -> PluginInstallResult:
     """Install the Pi telemetry runtime hook plugin files."""
     dest = resolve_pi_plugin_dir(target_dir)
@@ -192,7 +204,7 @@ def install_pi_plugin(
     for name in file_names:
         src = PI_SRC_DIR / name
         tgt = dest / name
-        res = _install_file(src, tgt, dry_run=dry_run)
+        res = _install_file(src, tgt, dry_run=dry_run, endpoint_url=endpoint_url)
         results.append(res)
 
     installed = any(r.wrote for r in results) or all(r.status == "unchanged" for r in results)

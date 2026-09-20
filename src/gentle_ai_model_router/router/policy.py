@@ -139,8 +139,19 @@ class CandidateRanking:
 
 
 def normalize_phase(phase: str) -> str:
-    """Accept ``explore`` or ``sdd-explore``; reject anything else."""
+    """Accept ``explore``, ``sdd-explore``, or common runtime aliases; reject anything else."""
+    alias_map = {
+        "gentle-orchestrator": "explore",
+        "orchestrator": "explore",
+        "primary": "explore",
+        "chat": "explore",
+        "general": "explore",
+    }
+    if phase in alias_map:
+        return alias_map[phase]
     name = phase.removeprefix("sdd-")
+    if name in alias_map:
+        return alias_map[name]
     if name not in CANONICAL_PHASES:
         raise PolicyError(
             f"unknown phase '{phase}' (expected one of: {', '.join(CANONICAL_PHASES)})"

@@ -94,7 +94,7 @@ def apply_local_candidates(session: Session, candidates: Iterable[Any]) -> dict[
     return counts
 
 
-def get_engine(database_url: str) -> Engine:
+def get_engine(database_url: str, connect_timeout: int | None = 2) -> Engine:
     """Create a SQLAlchemy engine (SQLite file or Postgres URL)."""
     if database_url.startswith("sqlite"):
         # SQLite cannot create the db file inside a missing directory.
@@ -104,7 +104,10 @@ def get_engine(database_url: str) -> Engine:
         return create_engine(
             database_url, connect_args={"check_same_thread": False}, future=True
         )
-    return create_engine(database_url, future=True)
+    connect_args: dict[str, Any] = {}
+    if "postgres" in database_url and connect_timeout is not None:
+        connect_args["connect_timeout"] = connect_timeout
+    return create_engine(database_url, future=True, connect_args=connect_args)
 
 
 def get_engine_with_fallback(database_url: str, sqlite_fallback_url: str) -> tuple[Engine, str]:

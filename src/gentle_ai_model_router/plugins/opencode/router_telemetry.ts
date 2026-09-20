@@ -64,8 +64,8 @@ export const routerTelemetryPlugin: Plugin = async () => {
 
     "tool.execute.before": async (input, output) => {
       try {
-        if (input.tool !== "task" || typeof output.args?.subagent_type !== "string") return;
-        const subagent = output.args.subagent_type;
+        if (input.tool !== "task") return;
+        const subagent = output.args?.subagent_type || output.args?.agent || output.args?.subagent || "explore";
         const phase = normalizePhase(subagent);
         const taskText =
           output.args.description ||

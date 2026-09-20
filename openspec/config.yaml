@@ -1,0 +1,51 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Python >=3.11, FastAPI + Typer + SQLAlchemy, Pydantic v2, uv-managed (.venv).
+  Architecture: src-layout hatchling package (src/gentle_ai_model_router); CLI, API, router, training, collector layers; docs/ holds design records.
+  Testing: pytest from workspace root (testpaths=tests); ruff for lint+format; no coverage gate, no type checker, no E2E harness.
+  Style: ruff line-length 100, target py311; Given/When/Then scenarios; RFC 2119 keywords in specs.
+
+strict_tdd: true
+
+projects:
+  - path: "."
+    stack: "Python >=3.11 (FastAPI, Typer, SQLAlchemy, Pydantic v2, uv)"
+    test_command: "pytest"
+    test_framework: "pytest"
+    coverage_command: null
+    linter: "ruff check"
+    type_checker: null
+    formatter: "ruff format"
+
+testing:
+  workspace_test_command: "pytest"
+  coverage_threshold: 0
+  layers:
+    unit: "pytest (tests/test_*.py)"
+    integration: "pytest + pytest-httpx/respx + FastAPI TestClient (tests/test_api*.py)"
+    e2e: null
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    guidelines:
+      - Follow existing code patterns
+    tdd: true
+    test_command: "pytest"
+  verify:
+    test_command: "pytest"
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas

@@ -113,7 +113,10 @@ def _get_engine(database_url: str) -> Engine:
         return create_engine(database_url, connect_args={"check_same_thread": False}, future=True)
     if database_url.startswith("postgres://"):
         database_url = "postgresql://" + database_url[len("postgres://"):]
-    return create_engine(database_url, future=True)
+    connect_args: dict[str, Any] = {}
+    if "postgres" in database_url:
+        connect_args["connect_timeout"] = 2
+    return create_engine(database_url, future=True, connect_args=connect_args)
 
 
 class ShimStore:

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 DEFAULT_CONFIG_FILENAMES = ("router.yaml", "router.yaml.example")
 ENV_CONFIG_VAR = "ROUTER_CONFIG"
@@ -350,6 +350,34 @@ class EvaluationConfig(BaseModel):
     device: DeviceSetting = "auto"
 
 
+class GatewayConfig(BaseModel):
+    """OpenAI-compatible gateway proxy settings."""
+
+    enabled: bool = True
+    upstream_base_url: str = "https://api.kimi.ai/coding/v1"
+    upstream_api_key: str | None = None
+    timeout_seconds: float = 120.0
+
+    @model_validator(mode="after")
+    def _resolve_env_overrides(self) -> GatewayConfig:
+        env_url = os.environ.get("UPSTREAM_BASE_URL") or os.environ.get(
+            "GATEWAY_UPSTREAM_URL"
+        )
+        if env_url and (
+            self.upstream_base_url == "https://api.kimi.ai/coding/v1"
+            or not self.upstream_base_url
+        ):
+            self.upstream_base_url = env_url
+        if self.upstream_api_key is None:
+            self.upstream_api_key = (
+                os.environ.get("UPSTREAM_API_KEY")
+                or os.environ.get("GATEWAY_API_KEY")
+                or os.environ.get("KIMI_API_KEY")
+                or os.environ.get("OPENROUTER_API_KEY")
+            )
+        return self
+
+
 class RouterConfig(BaseModel):
     """Top-level router configuration."""
 
@@ -366,6 +394,7 @@ class RouterConfig(BaseModel):
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     token_weights: dict[str, float] = Field(default_factory=dict)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     @property

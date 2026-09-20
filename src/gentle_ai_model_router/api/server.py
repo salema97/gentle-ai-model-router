@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from sqlalchemy.engine import Engine
 
@@ -25,6 +25,12 @@ from gentle_ai_model_router.api.schemas import (
     RouteRequest,
     RouteResponse,
     SystemOneMeta,
+)
+from gentle_ai_model_router.gateway import (
+    ChatCompletionRequest,
+    ModelListResponse,
+    handle_chat_completion,
+    list_gateway_models,
 )
 from gentle_ai_model_router.integration import telemetry_shim
 from gentle_ai_model_router.integration.outcome import (
@@ -310,6 +316,29 @@ def create_app(
         response = _decision_to_response(decision, _current_hash())
         _record_decision(shim_store, request, decision, candidate_count)
         return response
+
+    @app.get("/v1/models", response_model=ModelListResponse)
+    @app.get("/models", response_model=ModelListResponse)
+    def get_models() -> ModelListResponse:
+        """OpenAI-compatible models catalog listing."""
+        return list_gateway_models(engine)
+
+    @app.post("/v1/chat/completions")
+    @app.post("/chat/completions")
+    async def chat_completions(
+        chat_request: ChatCompletionRequest,
+        raw_request: Request,
+    ) -> Response:
+        """OpenAI-compatible chat completion proxy endpoint with dynamic routing."""
+        auth_header = raw_request.headers.get("authorization")
+        return await handle_chat_completion(
+            chat_request,
+            config=config,
+            engine=engine,
+            shim_store=shim_store,
+            ranker=app.state.ranker,
+            auth_header=auth_header,
+        )
 
     @app.get("/health")
     def health() -> dict[str, str]:

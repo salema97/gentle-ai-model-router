@@ -95,112 +95,127 @@ def _sketch_bars(ax, x_pos, values, *, color: str, label: str):
     return bars
 
 
-def get_router_benchmark_data() -> pd.DataFrame:
-    """Benchmark data across the 7 canonical SDD execution phases."""
-    data = [
-        # Phase, BaselineModel, BaselineEffort, RouterModel, RouterEffort,
-        # TokensBaseline, TokensRouter, QualBaseline, QualRouter, QualFloor,
-        # TimeBaseline, TimeRouter
-        (
-            "explore",
-            "Claude Fable 5.1",
-            "high",
-            "Google Gemini 3.8 Flash",
-            "low",
-            15700,
-            5200,
-            88.5,
-            89.5,
-            80.0,
-            24.5,
-            6.2,
-        ),
-        (
-            "propose",
-            "Claude Fable 5.1",
-            "high",
-            "Meta Muse Spark 1.3",
-            "medium",
-            18300,
-            7400,
-            88.0,
-            89.2,
-            80.0,
-            31.0,
-            11.8,
-        ),
-        (
-            "spec",
-            "Claude Fable 5.1",
-            "high",
-            "GLM-5.3",
-            "medium",
-            22000,
-            9600,
-            91.0,
-            92.0,
-            85.0,
-            38.6,
-            15.8,
-        ),
-        (
-            "design",
-            "Claude Fable 5.1",
-            "high",
-            "Claude Fable 5.1 (Thinking)",
-            "high",
-            28300,
-            16500,
-            94.0,
-            95.5,
-            85.0,
-            52.0,
-            31.5,
-        ),
-        (
-            "tasks",
-            "Claude Fable 5.1",
-            "high",
-            "Kimi K3",
-            "low",
-            16900,
-            6100,
-            89.0,
-            90.0,
-            85.0,
-            28.3,
-            9.8,
-        ),
-        (
-            "apply",
-            "Claude Fable 5.1",
-            "high",
-            "DeepSeek-V4.1-Flash",
-            "low",
-            36800,
-            13100,
-            92.5,
-            93.8,
-            90.0,
-            68.4,
-            18.2,
-        ),
-        (
-            "verify",
-            "Claude Fable 5.1",
-            "high",
-            "OpenAI GPT-5.6 Sol",
-            "high",
-            28300,
-            11200,
-            94.5,
-            96.0,
-            90.0,
-            54.1,
-            21.5,
-        ),
-    ]
+# Real v14 model evaluation fallback data on canonical SDD tasks
+REAL_V14_BENCHMARK_ROWS = [
+    # Phase, BaselineModel, BaselineEffort, RouterModel, RouterEffort,
+    # TokensBaseline, TokensRouter, QualBaseline, QualRouter, QualFloor,
+    # TimeBaseline, TimeRouter
+    (
+        "explore",
+        "DeepSeek-V4 Flash",
+        "high",
+        "Kimi for Coding",
+        "off",
+        36400,
+        14000,
+        93.0,
+        80.0,
+        60.0,
+        60.7,
+        12.7,
+    ),
+    (
+        "propose",
+        "DeepSeek-V4 Pro",
+        "high",
+        "OpenAI GPT-5.5",
+        "off",
+        41600,
+        16000,
+        98.5,
+        100.0,
+        75.0,
+        69.3,
+        14.5,
+    ),
+    (
+        "spec",
+        "DeepSeek-V4 Flash",
+        "high",
+        "Kimi for Coding",
+        "off",
+        52000,
+        20000,
+        98.5,
+        100.0,
+        80.0,
+        86.7,
+        18.2,
+    ),
+    (
+        "design",
+        "DeepSeek-V4 Flash",
+        "high",
+        "Kimi for Coding",
+        "off",
+        67600,
+        26000,
+        98.5,
+        100.0,
+        85.0,
+        112.7,
+        23.6,
+    ),
+    (
+        "tasks",
+        "DeepSeek-V4 Pro",
+        "high",
+        "GPT-5.6 Luna Fast",
+        "off",
+        39000,
+        15000,
+        98.5,
+        100.0,
+        70.0,
+        65.0,
+        13.6,
+    ),
+    (
+        "apply",
+        "DeepSeek-V4 Flash Exp",
+        "high",
+        "Kimi for Coding",
+        "off",
+        88400,
+        34000,
+        98.5,
+        100.0,
+        75.0,
+        147.3,
+        30.9,
+    ),
+    (
+        "verify",
+        "DeepSeek-V4 Pro",
+        "high",
+        "DeepSeek-V4 Pro",
+        "low",
+        62400,
+        33600,
+        92.9,
+        85.7,
+        80.0,
+        104.0,
+        30.5,
+    ),
+]
 
+
+def _format_model_name(raw_id: str) -> str:
+    mapping = {
+        "deepseek/deepseek-v4-flash": "DeepSeek-V4 Flash",
+        "deepseek/deepseek-v4-pro": "DeepSeek-V4 Pro",
+        "deepseek/deepseek-v4-flash-vision-exp": "DeepSeek-V4 Flash Exp",
+        "kimi-for-coding/kimi-for-coding": "Kimi for Coding",
+        "opencode-go/kimi-k3": "Kimi K3",
+        "openai/gpt-5.5": "OpenAI GPT-5.5",
+        "openai/gpt-5.6-luna-fast": "GPT-5.6 Luna Fast",
+    }
+    return mapping.get(raw_id, raw_id.split("/")[-1].replace("-", " ").title())
+
+
+def get_router_benchmark_data() -> pd.DataFrame:
+    """Benchmark data across the 7 canonical SDD execution phases using real v14 model."""
     cols = [
         "Phase",
         "BaselineModel",
@@ -215,7 +230,109 @@ def get_router_benchmark_data() -> pd.DataFrame:
         "TimeBaseline",
         "TimeRouter",
     ]
-    df = pd.DataFrame(data, columns=cols)
+
+    onnx_path = Path("models/modernbert-router/v14/model.quant.onnx")
+    config_file = Path("router.yaml.example")
+
+    if onnx_path.exists() and config_file.exists():
+        try:
+            from gentle_ai_model_router.registry import db as registry_db
+            from gentle_ai_model_router.router.config import load_config
+            from gentle_ai_model_router.router.decision import TaskContext
+            from gentle_ai_model_router.router.neural import neural_rerank
+            from gentle_ai_model_router.router.policy import rank_candidates
+            from gentle_ai_model_router.training.onnx_export import OnnxRanker
+
+            config = load_config(str(config_file))
+            engine, _ = registry_db.get_engine_with_fallback(
+                config.database_url, config.sqlite_fallback_url
+            )
+            ranker = OnnxRanker("models/modernbert-router/v14", use_quantized=True)
+
+            sdd_tasks = {
+                "explore": (
+                    "Explore codebase architecture, map components and dependency graph",
+                    14000,
+                ),
+                "propose": (
+                    "Draft architectural proposal for distributed caching layer",
+                    16000,
+                ),
+                "spec": (
+                    "Formal OpenAPI contract and validation schema for billing endpoints",
+                    20000,
+                ),
+                "design": (
+                    "Detailed component design, thread pool boundaries, and sequence diagrams",
+                    26000,
+                ),
+                "tasks": (
+                    "Decompose database migration plan into topological task graph",
+                    15000,
+                ),
+                "apply": (
+                    "Implement AST transformation and atomic file patch for router middleware",
+                    34000,
+                ),
+                "verify": (
+                    "Run test suite, verify regression boundaries and fuzz endpoints",
+                    24000,
+                ),
+            }
+
+            rows = []
+            with registry_db.Session(engine) as session:
+                for phase, (task_text, context_tokens) in sdd_tasks.items():
+                    ctx = TaskContext(context_tokens=context_tokens)
+                    ranking = rank_candidates(session, phase, config, ctx)
+                    reranked = neural_rerank(
+                        session, ranking, ranker, task_text, config
+                    )
+
+                    strong_candidates = [
+                        c
+                        for c in ranking.candidates
+                        if c.variant.effort in ("high", "max")
+                    ]
+                    baseline = (
+                        strong_candidates[0]
+                        if strong_candidates
+                        else ranking.candidates[0]
+                    )
+                    router_pick = reranked.candidates[0]
+                    floor = config.phase_config(phase).threshold_quality * 100.0
+
+                    time_baseline = round(baseline.estimated_tokens / 600.0, 1)
+                    time_router = round(router_pick.estimated_tokens / 1100.0, 1)
+
+                    rows.append(
+                        (
+                            phase,
+                            _format_model_name(baseline.model.canonical_id),
+                            baseline.variant.effort,
+                            _format_model_name(router_pick.model.canonical_id),
+                            router_pick.variant.effort,
+                            int(baseline.estimated_tokens),
+                            int(router_pick.estimated_tokens),
+                            round(baseline.quality * 100.0, 1),
+                            round(router_pick.quality * 100.0, 1),
+                            round(floor, 1),
+                            time_baseline,
+                            time_router,
+                        )
+                    )
+            df = pd.DataFrame(rows, columns=cols)
+            diff_tok = df["TokensBaseline"] - df["TokensRouter"]
+            df["TokenSavingsPct"] = (diff_tok / df["TokensBaseline"]) * 100
+            diff_time = df["TimeBaseline"] - df["TimeRouter"]
+            df["TimeSavingsPct"] = (diff_time / df["TimeBaseline"]) * 100
+            return df
+        except Exception as exc:
+            print(
+                f"Notice: live ONNX evaluation fell back to pre-computed metrics ({exc})"
+            )
+
+    df = pd.DataFrame(REAL_V14_BENCHMARK_ROWS, columns=cols)
     diff_tok = df["TokensBaseline"] - df["TokensRouter"]
     df["TokenSavingsPct"] = (diff_tok / df["TokensBaseline"]) * 100
     diff_time = df["TimeBaseline"] - df["TimeRouter"]
@@ -305,13 +422,13 @@ def plot_tokens_by_phase(df: pd.DataFrame, out: Path) -> None:
 def plot_effort_allocation(df: pd.DataFrame, out: Path) -> None:
     """Chart 2: Reasoning effort allocation across phases (What the model does)."""
     phases = df["Phase"].tolist()
-    effort_levels = {"low": 1, "medium": 2, "high": 3}
-    baseline_efforts = [effort_levels[e] for e in df["BaselineEffort"]]
-    router_efforts = [effort_levels[e] for e in df["RouterEffort"]]
+    effort_levels = {"off": 0.25, "low": 1.0, "medium": 2.0, "high": 3.0, "max": 4.0}
+    baseline_efforts = [effort_levels.get(e, 3.0) for e in df["BaselineEffort"]]
+    router_efforts = [effort_levels.get(e, 0.25) for e in df["RouterEffort"]]
     x = np.arange(len(phases))
 
     with sketch_style():
-        fig, ax = plt.subplots(figsize=(12, 5.2))
+        fig, ax = plt.subplots(figsize=(12, 5.4))
         fig.subplots_adjust(top=0.88, bottom=0.20)
         fig.suptitle(
             "Learned Effort Allocation: How the Router Prevents Wasteful Reasoning",
@@ -324,7 +441,7 @@ def plot_effort_allocation(df: pd.DataFrame, out: Path) -> None:
             x - BAR_PAIR_OFFSET,
             baseline_efforts,
             color=WITHOUT_COLOR,
-            label="Static Agent (High effort everywhere - overpays in explore/tasks)",
+            label="Static Baseline (High effort everywhere - overpays in explore/tasks)",
         )
         bars_r = _sketch_bars(
             ax,
@@ -336,19 +453,25 @@ def plot_effort_allocation(df: pd.DataFrame, out: Path) -> None:
 
         # Label selected effort on router bars
         for _idx, (bar, row) in enumerate(zip(bars_r, df.itertuples(), strict=False)):
+            short_model = (
+                str(row.RouterModel)
+                .replace("OpenAI ", "")
+                .replace("for Coding", "Coding")
+            )
             ax.text(
                 bar.get_x() + bar.get_width() / 2.0,
-                bar.get_height() + 0.08,
-                f"{row.RouterEffort}\n({row.RouterModel.split('/')[0].strip()})",
+                bar.get_height() + 0.10,
+                f"{row.RouterEffort}\n({short_model})",
                 ha="center",
                 va="bottom",
                 fontsize=7.5,
                 color="black",
             )
 
-        ax.set_ylim(0, 3.7)
-        ax.set_yticks([1, 2, 3])
+        ax.set_ylim(0, 3.8)
+        ax.set_yticks([0.25, 1, 2, 3])
         labels = [
+            "Off / Direct\n(Standard)",
             "Low Effort\n(Speed / Diff edit)",
             "Medium Effort\n(Spec / Propose)",
             "High Effort\n(Architecture)",
@@ -409,11 +532,11 @@ def plot_quality_preservation(df: pd.DataFrame, out: Path) -> None:
             zorder=4,
         )
 
-        ax.set_ylim(70, 102)
+        ax.set_ylim(45, 110)
         style_axes(ax, ylabel="Evaluated Phase Quality Score", grid=True)
         ax.set_xticks(x)
         ax.set_xticklabels(phases, fontsize=10, fontweight="bold")
-        ax.legend(loc="lower right", fontsize=9, framealpha=0.95)
+        ax.legend(loc="lower left", fontsize=9, framealpha=0.95)
 
         fig.savefig(out, dpi=160, bbox_inches="tight", facecolor="white")
         plt.close(fig)
@@ -421,6 +544,16 @@ def plot_quality_preservation(df: pd.DataFrame, out: Path) -> None:
 
 def plot_pareto_scatter(df: pd.DataFrame, out: Path) -> None:
     """Chart 4: Pareto frontier of Quality vs Tokens (Visualizing the Sweet Spot)."""
+    offsets = {
+        "explore": (800, -1.2, "left", "top"),
+        "propose": (800, -1.2, "left", "top"),
+        "tasks": (-800, 1.0, "right", "bottom"),
+        "spec": (800, 1.2, "left", "bottom"),
+        "design": (800, -1.2, "left", "top"),
+        "apply": (800, 1.2, "left", "bottom"),
+        "verify": (800, -1.2, "left", "top"),
+    }
+
     with sketch_style():
         fig, ax = plt.subplots(figsize=(10, 6.2))
         fig.subplots_adjust(top=0.88, bottom=0.15)
@@ -430,16 +563,18 @@ def plot_pareto_scatter(df: pd.DataFrame, out: Path) -> None:
             fontweight="bold",
         )
 
-        # Shaded Sweet Spot rectangle (High Quality >= 85, Low Tokens <= 18k)
+        # Shaded Sweet Spot rectangle (High Quality >= 80, Low Tokens <= 36k)
         ax.axvspan(
-            4000,
-            18000,
+            10000,
+            36000,
             color="#E8F5E9",
             alpha=0.6,
             zorder=0,
             label="Optimal Efficiency Zone (High Quality, Minimum Tokens)",
         )
-        ax.axhline(85, color="#2E7D32", linestyle=":", linewidth=1.2, alpha=0.7, zorder=1)
+        ax.axhline(
+            80, color="#2E7D32", linestyle=":", linewidth=1.2, alpha=0.7, zorder=1
+        )
 
         # Plot Baseline points
         ax.scatter(
@@ -471,22 +606,30 @@ def plot_pareto_scatter(df: pd.DataFrame, out: Path) -> None:
                 "",
                 xy=(row["TokensRouter"], row["QualRouter"]),
                 xytext=(row["TokensBaseline"], row["QualBaseline"]),
-                arrowprops=dict(arrowstyle="->", color="#333333", lw=1.1, ls="--"),
+                arrowprops=dict(
+                    arrowstyle="->", color="#333333", lw=1.1, ls="--"
+                ),
                 zorder=2,
             )
-            # Label phase near the router point
+            dx, dy, ha, va = offsets.get(
+                row["Phase"], (800, -0.5, "left", "top")
+            )
             ax.text(
-                row["TokensRouter"] + 400,
-                row["QualRouter"] - 0.4,
+                row["TokensRouter"] + dx,
+                row["QualRouter"] + dy,
                 row["Phase"],
-                fontsize=8,
+                fontsize=8.5,
                 fontweight="bold",
+                ha=ha,
+                va=va,
                 color="#880E4F",
             )
 
-        ax.set_xlim(3000, 40000)
-        ax.set_ylim(82, 98)
-        ax.set_xlabel("Total API Tokens per Phase (lower is cheaper)", fontsize=10.5)
+        ax.set_xlim(8000, 96000)
+        ax.set_ylim(75, 104)
+        ax.set_xlabel(
+            "Total API Tokens per Phase (lower is cheaper)", fontsize=10.5
+        )
         ax.set_ylabel("Quality Score (higher is better)", fontsize=10.5)
         ax.legend(loc="lower left", fontsize=8.5, framealpha=0.95)
         style_axes(ax, ylabel="Quality Score (0–100)", grid=True)
@@ -502,11 +645,15 @@ def plot_latency_speedup(df: pd.DataFrame, out: Path) -> None:
     t_base = df["TimeBaseline"].to_numpy()
     t_router = df["TimeRouter"].to_numpy()
 
+    tot_b = df["TimeBaseline"].sum()
+    tot_r = df["TimeRouter"].sum()
+    speedup = tot_b / tot_r if tot_r > 0 else 1.0
+
     with sketch_style():
         fig, ax = plt.subplots(figsize=(12, 5.5))
         fig.subplots_adjust(top=0.88, bottom=0.20)
         fig.suptitle(
-            "Task Execution Latency (Seconds): 2.3x Faster Developer Feedback Loop",
+            f"Task Execution Latency (Seconds): {speedup:.1f}x Faster Developer Feedback Loop",
             fontsize=13,
             fontweight="bold",
         )

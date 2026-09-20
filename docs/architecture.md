@@ -32,6 +32,8 @@ regress success rate below a configurable threshold).
 
 ## Data flow
 
+<img src="assets/architecture-target.png" alt="Gentle AI Model Router Architecture" width="100%" />
+
 ```
                       ┌────────────────────────────────────────────┐
                       │              DATA SOURCES                  │

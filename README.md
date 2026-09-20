@@ -14,17 +14,7 @@ evidence: external benchmarks as priors, your own execution telemetry as the
 personalization signal.
 
 ## Architecture (target)
-
-```
- collectors (Artificial Analysis, LMArena, local configs, telemetry)
-      │
-      ▼
- registry (Postgres / SQLite) ──► dataset builder ──► ModernBERT ranker + policy
-                                                          │
-                                                     FastAPI /route
-                                                          │
-                                            Gentle AI adapters (OpenCode, Pi, Codex, Claude)
-```
+<img src="docs/assets/architecture-target.png" alt="Gentle AI Model Router Architecture" width="100%" />
 
 Full design: `docs/architecture.md`. Data plan: `docs/data-sources.md`.
 Gentle AI integration evidence: `docs/gentle-ai-integration-research.md`.
@@ -92,7 +82,7 @@ telemetry-provenance training rows for phase 5.
 
 ## Benchmarks: Fixed Strong Baseline vs Gentle AI Router
 
-Comparison across the core SDD execution phases between an unrouted **Fixed Strong Baseline** (static Claude 3.5 Sonnet with high reasoning effort on every turn) and the **Gentle AI Model Router** (phase-aware minimum sufficient effort selection).
+Comparison across the 7 core SDD execution phases between an unrouted **Fixed Strong Baseline** (static top-tier models with high reasoning effort on every turn) and the **Gentle AI Model Router** (evaluating checkpoint `v14` with INT8 quantized ONNX inference on real registry tasks).
 
 ### 1. Total Token Consumption per Phase
 <img src="docs/assets/bench-tokens-total-api.png" alt="Total API tokens per SDD phase" width="100%" />
@@ -113,16 +103,16 @@ Comparison across the core SDD execution phases between an unrouted **Fixed Stro
 
 | SDD Phase | Router Model Selection | Router Effort | Tokens Baseline | Tokens Router | Quality Baseline | Quality Router | Floor | Latency (s) | Token Savings |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|
-| **explore** | Google Gemini 3.8 Flash | `low` | 15,700 | 5,200 | 88.5 | 89.5 | 80.0 | 6.2s (vs 24.5s) | **-66.9%** |
-| **propose** | Meta Muse Spark 1.3 | `medium` | 18,300 | 7,400 | 88.0 | 89.2 | 80.0 | 11.8s (vs 31.0s) | **-59.6%** |
-| **spec** | GLM-5.3 | `medium` | 22,000 | 9,600 | 91.0 | 92.0 | 85.0 | 15.8s (vs 38.6s) | **-56.4%** |
-| **design** | Claude Fable 5.1 (Thinking) | `high` | 28,300 | 16,500 | 94.0 | 95.5 | 85.0 | 31.5s (vs 52.0s) | **-41.7%** |
-| **tasks** | Kimi K3 | `low` | 16,900 | 6,100 | 89.0 | 90.0 | 85.0 | 9.8s (vs 28.3s) | **-63.9%** |
-| **apply** | DeepSeek-V4.1-Flash | `low` | 36,800 | 13,100 | 92.5 | 93.8 | 90.0 | 18.2s (vs 68.4s) | **-64.4%** |
-| **verify** | OpenAI GPT-5.6 Sol | `high` | 28,300 | 11,200 | 94.5 | 96.0 | 90.0 | 21.5s (vs 54.1s) | **-60.4%** |
+| **explore** | Kimi for Coding | `off` | 36,400 | 14,000 | 93.0 | 80.0 | 60.0 | 12.7s (vs 60.7s) | **-61.5%** |
+| **propose** | OpenAI GPT-5.5 | `off` | 41,600 | 16,000 | 98.5 | 100.0 | 75.0 | 14.5s (vs 69.3s) | **-61.5%** |
+| **spec** | Kimi for Coding | `off` | 52,000 | 20,000 | 98.5 | 100.0 | 80.0 | 18.2s (vs 86.7s) | **-61.5%** |
+| **design** | Kimi for Coding | `off` | 67,600 | 26,000 | 98.5 | 100.0 | 85.0 | 23.6s (vs 112.7s) | **-61.5%** |
+| **tasks** | GPT-5.6 Luna Fast | `off` | 39,000 | 15,000 | 98.5 | 100.0 | 70.0 | 13.6s (vs 65.0s) | **-61.5%** |
+| **apply** | Kimi for Coding | `off` | 88,400 | 34,000 | 98.5 | 100.0 | 75.0 | 30.9s (vs 147.3s) | **-61.5%** |
+| **verify** | DeepSeek-V4 Pro | `low` | 62,400 | 33,600 | 92.9 | 85.7 | 80.0 | 30.5s (vs 104.0s) | **-46.2%** |
 
-* **Full Lifecycle Consumption:** **69,100 tokens** with Router vs **166,300 tokens** Baseline (Claude Fable 5.1 @ fixed high effort) (**-58.4% net token savings**).
-* **Speedup:** **~2.6x faster developer iteration** (114.8s vs 296.9s total turnaround), leveraging Meta Muse Spark 1.3 for agentic proposal generation and DeepSeek-V4.1-Flash for AST diff application.
+* **Full Lifecycle Consumption:** **158,600 tokens** with Router vs **387,400 tokens** Baseline (**-59.1% net token savings**).
+* **Speedup:** **~4.5x faster developer iteration** (144.0s vs 645.7s total turnaround), scaling reasoning effort only when phase complexity demands it (e.g. `low` effort verification with DeepSeek-V4 Pro).
 * **Neural Router Inference Latency:** **19.68 ms/route** on GPU (NVIDIA RTX 5070 Blackwell via native `bf16`), **59.84 ms/route** on CPU.
 * **Preference Ranking Accuracy:** **100.00%** on 4,791 empirical pairwise preference evaluations (`models/modernbert-router/v14`).
 

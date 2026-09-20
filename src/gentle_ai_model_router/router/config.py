@@ -326,6 +326,7 @@ class TrainingConfig(BaseModel):
     learning_rate: float = 2e-5
     epochs: float = 2.0
     batch_size: int = 8
+    gradient_accumulation_steps: int = 1
     max_length: int = 512
     seed: int = 42
     device: DeviceSetting = "auto"  # auto = cuda when available, else cpu

@@ -1960,6 +1960,9 @@ def train(
     output_dir: str | None = typer.Option(None, "--output-dir", help="Checkpoint root."),
     epochs: float | None = typer.Option(None, "--epochs"),
     batch_size: int | None = typer.Option(None, "--batch-size"),
+    gradient_accumulation_steps: int | None = typer.Option(
+        None, "--gradient-accumulation-steps", help="Number of update steps to accumulate."
+    ),
     seed: int | None = typer.Option(None, "--seed"),
     device: str | None = typer.Option(
         None, "--device", help="auto | cpu | cuda (default: auto = cuda if available)."
@@ -1995,6 +1998,7 @@ def train(
         ("output_dir", output_dir),
         ("epochs", epochs),
         ("batch_size", batch_size),
+        ("gradient_accumulation_steps", gradient_accumulation_steps),
         ("seed", seed),
         ("device", device),
         ("telemetry_weight", telemetry_weight),

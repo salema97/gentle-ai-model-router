@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -157,9 +158,12 @@ def train(
     # model exists below. Trainer respects an already-placed model.
     device = resolve_device(training.device, torch.cuda.is_available())
     logger.info("training device=%s", device)
-    if device.startswith("cuda") and getattr(training, "max_vram_fraction", None) is not None:
-        torch.cuda.set_per_process_memory_fraction(training.max_vram_fraction, 0)
-        logger.info("capped CUDA memory fraction at %.2f", training.max_vram_fraction)
+    if device.startswith("cuda"):
+        if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        if getattr(training, "max_vram_fraction", None) is not None:
+            torch.cuda.set_per_process_memory_fraction(training.max_vram_fraction, 0)
+            logger.info("capped CUDA memory fraction at %.2f", training.max_vram_fraction)
 
     numeric_dim = len(dataset.model_feature_names) + len(dataset.benchmark_feature_names)
     tokenizer = AutoTokenizer.from_pretrained(training.model_name)
@@ -262,6 +266,7 @@ def train(
     args = TrainingArguments(
         output_dir=str(out_dir / "hf"),
         per_device_train_batch_size=training.batch_size,
+        gradient_accumulation_steps=getattr(training, "gradient_accumulation_steps", 1),
         learning_rate=training.learning_rate,
         num_train_epochs=training.epochs,
         seed=training.seed,

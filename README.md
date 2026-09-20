@@ -1,5 +1,12 @@
 # gentle-ai-model-router
 
+> **Live Production Router:** [https://router.salema.dev](https://router.salema.dev)  
+> High-performance neural router deployed on Dokploy (Ampere ARM64 + PostgreSQL telemetry store + ModernBERT v14 INT8 ONNX).
+
+[![API Status](https://img.shields.io/badge/API-router.salema.dev-brightgreen)](https://router.salema.dev/health)
+[![Release](https://img.shields.io/github/v/release/salema97/gentle-ai-model-router)](https://github.com/salema97/gentle-ai-model-router/releases)
+[![Model](https://img.shields.io/badge/Model-ModernBERT--v14--INT8-blue)](https://router.salema.dev/health)
+
 Learned, phase-aware **model + effort router** for [Gentle AI](https://github.com/Gentleman-Programming/gentle-ai).
 For each SDD phase (explore, propose, spec, design, tasks, apply, verify, …),
 it picks the `(model, deployment, effort)` candidate that minimizes
@@ -45,6 +52,23 @@ Gentle AI integration evidence: `docs/gentle-ai-integration-research.md`.
 
 ## Quickstart
 
+### Live Cloud Router (Production)
+
+Query the live production router directly over HTTPS:
+
+```bash
+# Health check (ONNX INT8 ranker active on Dokploy ARM64 VPS)
+curl -s https://router.salema.dev/health
+
+# Route a task to the optimal model and reasoning effort
+curl -s -X POST https://router.salema.dev/route \
+  -H 'content-type: application/json' \
+  -d '{"task": "Implement OAuth2 JWT authentication flow", "phase": "sdd-apply"}'
+# → {model, deployment, effort, score, confidence, probabilities, system_one: {effort_score, noul_fast_success}}
+```
+
+### Local Development
+
 ```bash
 # 1. Collect priors + local candidates into the snapshot store.
 #    NOTE: the Artificial Analysis source needs ARTIFICIAL_ANALYSIS_API_KEY;
@@ -54,21 +78,46 @@ router collect --source all
 # 2. Upsert the latest snapshots into the registry (idempotent).
 router normalize
 
-# 3. Inspect the deterministic policy, or serve it over HTTP (localhost).
+# 3. Inspect the deterministic policy, or serve it locally over HTTP.
 router policy --phase explore
 router explain --phase explore --task "map the repo"
 router serve   # uvicorn on 127.0.0.1:8377, per router.yaml `api:` section
 
-# 4. Route one phase invocation (fails closed with 503 on an empty registry).
+# 4. Route one phase invocation locally:
 curl -s -X POST http://127.0.0.1:8377/route \
   -H 'content-type: application/json' \
   -d '{"task": "refactor auth module", "phase": "sdd-apply"}'
-# → {model, deployment, effort, score, alternatives, reason_codes,
-#    estimated_tokens, estimated_cost, policy_version, registry_hash,
-#    confidence, probabilities, system_one: {effort_score, noul_fast_success}}
 
 # 5. Export the active policy artifact (consumed by the Gentle AI integration).
 router export   # writes models/policy/<policy_version>.json
+```
+
+## OpenCode Integration
+
+### 1. Install Runtime Telemetry Hook Plugin
+Stream tokens, latencies, tool calls, and test results automatically to your PostgreSQL telemetry store:
+
+```bash
+# Install the zero-dependency JavaScript hook into ~/.config/opencode/plugins/
+router integrate plugins install --opencode
+
+# Point OpenCode telemetry to the live cloud router in ~/.bashrc or ~/.zshrc:
+export ROUTER_SHIM_ENDPOINT="https://router.salema.dev/shim/execution"
+```
+
+### 2. Apply Decisions to OpenCode Agents
+```bash
+# Fetch recommendation from the router:
+DECISION=$(curl -s -X POST https://router.salema.dev/route \
+  -H 'content-type: application/json' \
+  -d '{"task": "Run test suite and verify boundary conditions", "phase": "sdd-verify"}')
+
+MODEL=$(echo $DECISION | jq -r .model)
+EFFORT=$(echo $DECISION | jq -r .effort)
+
+# Apply to Gentle AI state file and sync OpenCode:
+router integrate gentle-state --phase verify --model "$MODEL" --effort "$EFFORT"
+gentle-ai sync
 ```
 
 ## Applying decisions + operating the loop

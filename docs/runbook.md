@@ -134,21 +134,21 @@ Once installed:
   tool calls, tool errors, test results, and phase outcomes.
 - **Pi**: hooks into `turn_context` and review completion events, capturing model assignments,
   thinking effort, tokens, and review decisions (`approved`, `correction_required`, `escalated`).
-- **Resilience**: dispatches asynchronously to `http://127.0.0.1:8377/shim/execution` (1500ms timeout).
+- **Resilience**: dispatches asynchronously to `https://router.salema.dev/shim/execution` (or local `http://127.0.0.1:8377/shim/execution`) with a 1500ms timeout.
   If the router server is offline, executions automatically append to local spool file (`data/telemetry-spool.jsonl`).
 
 ### 5b. Telemetry Ingestion HTTP API
 
-The FastAPI server (`router serve`) exposes live telemetry ingestion endpoints:
+The live router (`https://router.salema.dev` or local `router serve`) exposes live telemetry ingestion endpoints backed by PostgreSQL:
 
 ```bash
-# Ingest single execution (rubric auto-scores missing task_success/quality_score)
-curl -X POST http://127.0.0.1:8377/shim/execution \
+# Ingest single execution into PostgreSQL telemetry store
+curl -X POST https://router.salema.dev/shim/execution \
   -H "Content-Type: application/json" \
   -d '{"execution_id": "exec-1", "phase": "apply", "model": "anthropic/claude-3-5-sonnet", "total_tokens": 1200, "tests_passed": 10, "tests_failed": 0}'
 
 # Batch ingestion of multiple executions
-curl -X POST http://127.0.0.1:8377/shim/executions \
+curl -X POST https://router.salema.dev/shim/executions \
   -H "Content-Type: application/json" \
   -d '[{"execution_id": "exec-2", "phase": "explore", "total_tokens": 400}]'
 

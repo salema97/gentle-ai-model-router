@@ -4,4 +4,4 @@ Phase 0 skeleton: package directories contain docstrings only.
 See docs/architecture.md for the target design.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

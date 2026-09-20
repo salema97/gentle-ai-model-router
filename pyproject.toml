@@ -1,6 +1,6 @@
 [project]
 name = "gentle-ai-model-router"
-version = "0.1.0"
+version = "0.2.0"
 description = "Learned phase-aware model+effort router for Gentle AI SDD phases"
 readme = "README.md"
 requires-python = ">=3.11"

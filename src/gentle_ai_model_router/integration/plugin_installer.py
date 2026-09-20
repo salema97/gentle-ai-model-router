@@ -119,7 +119,7 @@ def _install_file(
         raise FileNotFoundError(f"Plugin source file not found: {source_path}")
 
     new_content = source_path.read_text(encoding="utf-8")
-    if endpoint_url and source_path.name == "router_telemetry.js":
+    if endpoint_url and source_path.name in ("router_telemetry.js", "router_telemetry.ts"):
         new_content = re.sub(
             r"const DEFAULT_ENDPOINT = ['\"][^'\"]+['\"];",
             f"const DEFAULT_ENDPOINT = '{endpoint_url}';",
@@ -173,7 +173,7 @@ def install_opencode_plugin(
 ) -> PluginInstallResult:
     """Install the OpenCode telemetry runtime hook plugin files."""
     dest = resolve_opencode_plugin_dir(target_dir)
-    file_names = ("router_telemetry.js", "router_telemetry.d.ts")
+    file_names = ("router_telemetry.js", "router_telemetry.d.ts", "router_telemetry.ts")
     results: list[InstalledFileResult] = []
 
     for name in file_names:
@@ -217,7 +217,11 @@ def install_pi_plugin(
 
 
 def _check_plugin_status(name: str, target_dir: Path, expected_version: str) -> PluginStatusInfo:
-    file_names = ("router_telemetry.js", "router_telemetry.d.ts")
+    file_names = (
+        ("router_telemetry.js", "router_telemetry.d.ts", "router_telemetry.ts")
+        if name == "opencode"
+        else ("router_telemetry.js", "router_telemetry.d.ts")
+    )
     present: list[str] = []
     missing: list[str] = []
     backups: list[Path] = []

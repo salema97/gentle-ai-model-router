@@ -32,7 +32,8 @@ def test_install_opencode_plugin_fresh_and_idempotent(tmp_path: Path) -> None:
     assert res1.installed is True
     assert (target / "router_telemetry.js").is_file()
     assert (target / "router_telemetry.d.ts").is_file()
-    assert len(res1.files) == 2
+    assert (target / "router_telemetry.ts").is_file()
+    assert len(res1.files) == 3
     assert all(f.status == "created" for f in res1.files)
 
     # Idempotent second run

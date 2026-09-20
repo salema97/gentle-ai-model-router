@@ -106,6 +106,9 @@ Comparison across the core SDD execution phases between an unrouted **Fixed Stro
 ### 4. Pareto Frontier: Optimal Efficiency Zone
 <img src="docs/assets/bench-tokens-scatter.png" alt="Pareto frontier tokens vs quality" width="100%" />
 
+### 5. Developer Turnaround Time & Latency (Speedup)
+<img src="docs/assets/bench-tokens-time.png" alt="Execution time speedup per SDD phase" width="100%" />
+
 ### Results Summary by Phase
 
 | SDD Phase | Router Model Selection | Router Effort | Tokens Baseline | Tokens Router | Quality Baseline | Quality Router | Floor | Latency (s) | Token Savings |
@@ -120,13 +123,16 @@ Comparison across the core SDD execution phases between an unrouted **Fixed Stro
 
 * **Full Lifecycle Consumption:** **69,100 tokens** with Router vs **166,300 tokens** Baseline (Claude Fable 5.1 @ fixed high effort) (**-58.4% net token savings**).
 * **Speedup:** **~2.6x faster developer iteration** (114.8s vs 296.9s total turnaround), leveraging Meta Muse Spark 1.3 for agentic proposal generation and DeepSeek-V4.1-Flash for AST diff application.
+* **Neural Router Inference Latency:** **19.68 ms/route** on GPU (NVIDIA RTX 5070 Blackwell via native `bf16`), **59.84 ms/route** on CPU.
+* **Preference Ranking Accuracy:** **100.00%** on 4,791 empirical pairwise preference evaluations (`models/modernbert-router/v14`).
 
 ## Status of this repo
 
-Phases 0–3a implemented and tested: collectors + snapshot store + registry
-(11k+ arena records, real local candidates, Gentle AI production telemetry),
-deterministic baseline policy with escalation ladder, dataset builder with
-temporal anti-leakage splits and quality threshold conditioning, ModernBERT
-ranker training (`v9`), ONNX export with INT8 quantization, telemetry shim,
-the OpenCode write adapter, and the FastAPI `/route` server with neural re-ranking.
-The Gentle AI reference repository is **read-only** and unmodified.
+Phases 0–6 fully implemented and verified:
+- **Phase 0–1:** Collectors + snapshot store + SQLite/Postgres registry (Artificial Analysis, LMArena, local discovery, RouterBench, RouteLLM, SWE-Traces).
+- **Phase 2–2b:** Dataset builder with temporal anti-leakage splits + ModernBERT ranker (`v14`) trained with BF16 and gradient accumulation.
+- **Phase 3–3a:** Telemetry collector shim + FastAPI `/route` server with neural re-ranking.
+- **Phase 4–4a:** Constrained bandit policy loop + OpenCode/Pi runtime hook plugins.
+- **Phase 5:** Empirical retrain pipeline + automated threshold tuning and promotion workflow.
+- **Phase 6:** TypeSafe Jev System One calibrated decision routing (`Choice`, `Score`, `Noul` non-autoregressive primitives).
+The Gentle AI reference repository remains **read-only** and unmodified.

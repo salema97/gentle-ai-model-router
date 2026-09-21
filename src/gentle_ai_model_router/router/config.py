@@ -443,7 +443,7 @@ def load_config(
             loaded = yaml.safe_load(fh) or {}
         if isinstance(loaded, dict):
             raw = loaded
-    overrides: dict[str, Any] = {}
+    merged = dict(raw)
     if data_dir is not None:
-        overrides["data_dir"] = Path(data_dir)
-    return RouterConfig(**raw, **overrides)
+        merged["data_dir"] = Path(data_dir)
+    return RouterConfig(**merged)

@@ -1,0 +1,10 @@
+# gentle-ai-model-router local configuration
+data_dir: "data"
+
+registry:
+  sqlite_filename: "router.db"
+
+api:
+  host: "127.0.0.1"
+  port: 8000
+  route_path: "/route"

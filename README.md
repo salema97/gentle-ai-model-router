@@ -43,33 +43,70 @@ Gentle AI integration evidence: `docs/gentle-ai-integration-research.md`.
 | 5 | ModernBERT phase/context ranker retrained on telemetry; threshold tuning; learned-policy promotion workflow | ✅ done |
 | 6 | TypeSafe Jev "System One" calibrated decision routing (`Choice`, `Score`, `Noul` primitives over ModernBERT; calibrated confidence; non-autoregressive single-pass inference) | ✅ done |
 
-## Quickstart
+## Quickstart (Local Standalone)
 
 ```bash
 # 1. Collect priors + local candidates into the snapshot store.
-#    NOTE: the Artificial Analysis source needs ARTIFICIAL_ANALYSIS_API_KEY;
-#    without it, aa collection degrades to a warning (arena/local still run).
 router collect --source all
 
 # 2. Upsert the latest snapshots into the registry (idempotent).
 router normalize
 
-# 3. Inspect the deterministic policy, or serve it over HTTP (localhost).
-router policy --phase explore
-router explain --phase explore --task "map the repo"
-router serve   # uvicorn on 127.0.0.1:8377, per router.yaml `api:` section
+# 3. Serve the local router daemon over HTTP (default: 127.0.0.1:8000 with ModernBERT ONNX INT8).
+router serve --port 8000
 
-# 4. Route one phase invocation (fails closed with 503 on an empty registry).
-curl -s -X POST http://127.0.0.1:8377/route \
+# 4. Route one phase invocation (returns winner model, calibrated effort, and System One metadata).
+curl -s -X POST http://127.0.0.1:8000/route \
   -H 'content-type: application/json' \
   -d '{"task": "refactor auth module", "phase": "sdd-apply"}'
 # → {model, deployment, effort, score, alternatives, reason_codes,
 #    estimated_tokens, estimated_cost, policy_version, registry_hash,
 #    confidence, probabilities, system_one: {effort_score, noul_fast_success}}
-
-# 5. Export the active policy artifact (consumed by the Gentle AI integration).
-router export   # writes models/policy/<policy_version>.json
 ```
+
+### Local Systemd Daemon (Linux)
+
+To run the local ModernBERT router continuously in the background on your workstation:
+
+```ini
+# ~/.config/systemd/user/gentle-router.service
+[Unit]
+Description=Gentle AI Model Router (ModernBERT Local ONNX)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/repositorios/gentle-ai-model-router
+ExecStart=%h/.local/bin/uv run router serve --port 8000
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
+```
+
+Enable and start:
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now gentle-router.service
+```
+
+### OpenCode Native Integration
+
+Instead of wrapping requests in an external gateway proxy or selecting dummy models like `auto`, OpenCode connects via a native runtime plugin ([`plugins/opencode/router_telemetry.ts`](plugins/opencode/router_telemetry.ts)):
+- **Transparent Dispatch:** Intercepts subagent task execution (`tool.execute.before`).
+- **Dynamic Model Allocation:** Sends currently available OpenCode models to `http://127.0.0.1:8000/route` and injects the optimal winner model and calibrated reasoning effort directly into the subagent invocation.
+- **Continuous Telemetry:** Records real-time token expenditure, latency, and success back to local SQLite (`data/telemetry.sqlite`).
+
+To install into OpenCode:
+```bash
+cp plugins/opencode/router_telemetry.ts ~/.config/opencode/plugins/router_telemetry.ts
+```
+
+### Cloud Gateway Architecture (Bifurcated Branch)
+
+For cloud/container deployments hosting an OpenAI-compatible `/v1/chat/completions` proxy with multi-tier quota failover, see branch [`cloud-gateway`](https://github.com/salema97/gentle-ai-model-router/tree/cloud-gateway).
 
 ## Applying decisions + operating the loop
 

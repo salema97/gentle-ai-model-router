@@ -36,3 +36,5 @@ NOT in scope:
 - [x] **G4** — Server Integration: Mount `/v1/models` and `/v1/chat/completions` in `api/server.py`.
 - [x] **G5** — Verification & Test Suite: Write comprehensive tests in `tests/test_proxy_gateway.py` covering models listing, streaming SSE, non-streaming, telemetry ingestion, and error handling.
 - [x] **G6** — OpenCode Provider Setup: Configure `gentle-router` in `~/.config/opencode/opencode.jsonc`.
+- [x] **G7** — Quota-Exhaustion & Error Fallback: Detect quota, balance, rate limit (402, 403, 429) and upstream failure (5xx), implement in-memory cooldown/circuit breaker, and automatically fall back to alternative candidates or secondary upstream in `gateway/proxy.py`.
+- [x] **G8** — Fallback Configuration & Tests: Add `fallback_upstream_url`, `fallback_upstream_key`, `fallback_model` to `GatewayConfig` and verify auto-fallback in `tests/test_proxy_gateway.py`.

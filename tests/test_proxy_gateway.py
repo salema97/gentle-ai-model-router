@@ -13,8 +13,11 @@ from sqlalchemy.orm import Session
 
 from gentle_ai_model_router.api.server import create_app
 from gentle_ai_model_router.gateway.proxy import (
+    clear_exhausted_targets,
     extract_task_and_phase,
+    is_target_exhausted,
     list_gateway_models,
+    mark_target_exhausted,
     resolve_upstream,
 )
 from gentle_ai_model_router.gateway.schemas import ChatMessage
@@ -47,6 +50,13 @@ def _seed(session: Session) -> None:
             registry_db.upsert_variant(session, deployment, effort, effort)
         registry_db.upsert_benchmark(session, model, AA, aa, None, "snap-test")
         registry_db.upsert_price(session, deployment, "snap-test", in_p, out_p, None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_cooldown():
+    clear_exhausted_targets()
+    yield
+    clear_exhausted_targets()
 
 
 @pytest.fixture
@@ -422,6 +432,206 @@ def test_upstream_500_error(
     assert "Internal Server Error" in res.text
     assert route.called
 
+    with shim_store.session() as s:
+        execs = s.scalars(select(ExecutionRecord)).all()
+        assert len(execs) == 1
+        assert execs[0].task_success == 0
+
+
+# ====================================================================== #
+# 7. Quota-Exhaustion & Fallback tests
+# ====================================================================== #
+
+
+@respx.mock
+def test_quota_exhaustion_fallback_non_streaming(
+    config: RouterConfig,
+    engine,
+    shim_store: telemetry_shim.ShimStore,
+) -> None:
+    # Configure secondary fallback upstream
+    config.gateway.fallback_upstream_url = "https://openrouter.ai/api/v1"
+    config.gateway.fallback_upstream_key = "sk-openrouter-fallback"
+    config.gateway.fallback_model = "openai/gpt-4o-mini"
+    client = TestClient(create_app(config, engine, shim_store))
+
+    # Primary (Kimi) returns 403 weekly usage limit error
+    kimi_route = respx.post("https://api.kimi.ai/coding/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            403,
+            json={
+                "error": {
+                    "message": "You've reached your weekly (7-day) usage limit.",
+                    "type": "access_terminated_error",
+                    "code": 403,
+                }
+            },
+        )
+    )
+
+    # Fallback (OpenRouter) returns 200 OK
+    fallback_route = respx.post("https://openrouter.ai/api/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-fallback-123",
+                "object": "chat.completion",
+                "created": 1726790400,
+                "model": "openai/gpt-4o-mini",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Recovered via fallback!"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 15, "completion_tokens": 10, "total_tokens": 25},
+            },
+        )
+    )
+
+    res = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Hello fallback"}]},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["choices"][0]["message"]["content"] == "Recovered via fallback!"
+    assert kimi_route.called
+    assert fallback_route.called
+
+    # Primary target should be recorded as exhausted in circuit breaker
+    assert is_target_exhausted("https://api.kimi.ai/coding/v1/chat/completions")
+
+    # Telemetry should record the successful fallback execution
+    with shim_store.session() as s:
+        execs = s.scalars(select(ExecutionRecord)).all()
+        assert len(execs) == 1
+        assert execs[0].task_success == 1
+        assert execs[0].execution_id == "chatcmpl-fallback-123"
+        assert execs[0].model == "openai/gpt-4o-mini"
+
+
+@respx.mock
+def test_quota_exhaustion_fallback_streaming(
+    config: RouterConfig,
+    engine,
+    shim_store: telemetry_shim.ShimStore,
+) -> None:
+    config.gateway.fallback_upstream_url = "https://openrouter.ai/api/v1"
+    config.gateway.fallback_upstream_key = "sk-openrouter-fallback"
+    config.gateway.fallback_model = "openai/gpt-4o-mini"
+    client = TestClient(create_app(config, engine, shim_store))
+
+    # Primary returns 403
+    kimi_route = respx.post("https://api.kimi.ai/coding/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            403,
+            json={
+                "error": {
+                    "message": "You've reached your weekly usage limit.",
+                    "type": "access_terminated_error",
+                }
+            },
+        )
+    )
+
+    # Fallback streams SSE
+    sse_body = (
+        b"data: {\"id\":\"chatcmpl-fb-stream\",\"choices\":[{\"index\":0,"
+        b"\"delta\":{\"role\":\"assistant\",\"content\":\"Fallback \"}}]}\n\n"
+        b"data: {\"id\":\"chatcmpl-fb-stream\",\"choices\":[{\"index\":0,"
+        b"\"delta\":{\"content\":\"stream!\"}}]}\n\n"
+        b"data: [DONE]\n\n"
+    )
+    fallback_route = respx.post("https://openrouter.ai/api/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            content=sse_body,
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    res = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Stream fallback"}], "stream": True},
+    )
+    assert res.status_code == 200
+    assert "text/event-stream" in res.headers["content-type"]
+    assert "Fallback " in res.text
+    assert "stream!" in res.text
+    assert kimi_route.called
+    assert fallback_route.called
+
+    with shim_store.session() as s:
+        execs = s.scalars(select(ExecutionRecord)).all()
+        assert len(execs) == 1
+        assert execs[0].task_success == 1
+        assert execs[0].execution_id == "chatcmpl-fb-stream"
+
+
+@respx.mock
+def test_circuit_breaker_skips_exhausted_primary(
+    config: RouterConfig,
+    engine,
+    shim_store: telemetry_shim.ShimStore,
+) -> None:
+    config.gateway.fallback_upstream_url = "https://openrouter.ai/api/v1"
+    config.gateway.fallback_upstream_key = "sk-openrouter-fallback"
+    config.gateway.fallback_model = "openai/gpt-4o-mini"
+    client = TestClient(create_app(config, engine, shim_store))
+
+    # Manually mark primary in cooldown
+    mark_target_exhausted("https://api.kimi.ai/coding/v1/chat/completions", cooldown_seconds=600.0)
+
+    kimi_route = respx.post("https://api.kimi.ai/coding/v1/chat/completions").mock(
+        return_value=httpx.Response(500, text="Should not be called")
+    )
+    fallback_route = respx.post("https://openrouter.ai/api/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-cb-fast",
+                "object": "chat.completion",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "Direct fallback!"}}
+                ],
+            },
+        )
+    )
+
+    res = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Fast route"}]},
+    )
+    assert res.status_code == 200
+    assert res.json()["choices"][0]["message"]["content"] == "Direct fallback!"
+    # Primary was NEVER called due to circuit breaker!
+    assert not kimi_route.called
+    assert fallback_route.called
+
+
+@respx.mock
+def test_all_upstreams_exhausted_returns_error(
+    config: RouterConfig,
+    engine,
+    shim_store: telemetry_shim.ShimStore,
+) -> None:
+    config.gateway.fallback_upstream_url = "https://openrouter.ai/api/v1"
+    client = TestClient(create_app(config, engine, shim_store))
+
+    respx.post("https://api.kimi.ai/coding/v1/chat/completions").mock(
+        return_value=httpx.Response(403, json={"error": {"message": "Primary quota exceeded"}})
+    )
+    respx.post("https://openrouter.ai/api/v1/chat/completions").mock(
+        return_value=httpx.Response(429, json={"error": {"message": "Fallback rate limit"}})
+    )
+
+    res = client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "Both fail"}]},
+    )
+    assert res.status_code in (403, 429)
     with shim_store.session() as s:
         execs = s.scalars(select(ExecutionRecord)).all()
         assert len(execs) == 1

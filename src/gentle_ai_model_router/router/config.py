@@ -356,6 +356,11 @@ class GatewayConfig(BaseModel):
     enabled: bool = True
     upstream_base_url: str = "https://api.kimi.ai/coding/v1"
     upstream_api_key: str | None = None
+    fallback_upstream_url: str | None = None
+    fallback_upstream_key: str | None = None
+    fallback_model: str = "auto"
+    max_fallback_attempts: int = 3
+    cooldown_seconds: float = 300.0
     timeout_seconds: float = 120.0
 
     @model_validator(mode="after")
@@ -375,6 +380,17 @@ class GatewayConfig(BaseModel):
                 or os.environ.get("KIMI_API_KEY")
                 or os.environ.get("OPENROUTER_API_KEY")
             )
+        fb_url = os.environ.get("FALLBACK_UPSTREAM_URL")
+        if fb_url and not self.fallback_upstream_url:
+            self.fallback_upstream_url = fb_url
+        if self.fallback_upstream_key is None:
+            self.fallback_upstream_key = (
+                os.environ.get("FALLBACK_UPSTREAM_KEY")
+                or os.environ.get("FALLBACK_API_KEY")
+            )
+        fb_model = os.environ.get("FALLBACK_MODEL")
+        if fb_model and self.fallback_model == "auto":
+            self.fallback_model = fb_model
         return self
 
 

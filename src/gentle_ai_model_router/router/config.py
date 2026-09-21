@@ -302,7 +302,6 @@ class PolicyConfig(BaseModel):
             "local",
             "vllm",
             "llama.cpp",
-            "opencode",
             "lmstudio",
             "exo",
         ]
@@ -316,6 +315,21 @@ class PolicyConfig(BaseModel):
     )
     pricing_overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
     neural_cost_weight: float = 10.0
+    phase_cost_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "init": 2.0,
+            "explore": 4.0,
+            "research": 3.0,
+            "tasks": 3.0,
+            "propose": 1.0,
+            "spec": 0.5,
+            "design": 0.0,
+            "apply": 0.5,
+            "verify": 0.5,
+            "archive": 4.0,
+            "onboard": 2.0,
+        }
+    )
     top_k: int = 5
 
 

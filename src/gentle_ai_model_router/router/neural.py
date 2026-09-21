@@ -227,7 +227,9 @@ def neural_rerank(
     scores = [float(s) for s in raw_scores]
 
     scored = list(zip(candidates_to_score, scores, strict=True))
-    cost_weight = getattr(config.policy, "neural_cost_weight", 10.0)
+    phase_weights = getattr(config.policy, "phase_cost_weights", None) or {}
+    default_cost_weight = getattr(config.policy, "neural_cost_weight", 10.0)
+    cost_weight = phase_weights.get(ranking.phase, default_cost_weight)
     lambda_p = getattr(config.policy, "lambda_price", 1.0)
     scored.sort(
         key=lambda item: (

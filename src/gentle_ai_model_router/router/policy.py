@@ -521,8 +521,8 @@ def rank_candidates(
     meeting.sort(
         key=lambda c: (
             c.estimated_tokens,
-            c.estimated_cost,
             -c.quality,
+            c.estimated_cost,
             c.model.canonical_id,
             c.variant.effort,
         )

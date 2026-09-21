@@ -296,6 +296,26 @@ class PolicyConfig(BaseModel):
     output_fraction: float = 0.3  # share of estimated tokens priced as output
     default_input_price: float = 5.0  # USD/1M, used when price unknown
     default_output_price: float = 15.0
+    zero_cost_providers: list[str] = Field(
+        default_factory=lambda: [
+            "ollama",
+            "local",
+            "vllm",
+            "llama.cpp",
+            "opencode",
+            "lmstudio",
+            "exo",
+        ]
+    )
+    zero_cost_patterns: list[str] = Field(
+        default_factory=lambda: [
+            "*free*",
+            "*:free",
+            "*-free",
+        ]
+    )
+    pricing_overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
+    neural_cost_weight: float = 10.0
     top_k: int = 5
 
 

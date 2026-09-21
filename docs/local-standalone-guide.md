@@ -130,3 +130,23 @@ with s.session() as sess:
     print('Executions recorded:', sess.query(ExecutionRecord).count())
 "
 ```
+
+---
+
+## 5. Zero-Cost Model Prioritization & Cost-Aware Neural Utility
+
+To prevent unnecessary expenditure on simple tasks (such as `explore` reads or low-complexity planning), the router incorporates a multi-tier domain pricing resolution engine and cost-aware utility re-ranking:
+
+### Pricing Resolution Precedence:
+1. **Declarative Overrides (`policy.pricing_overrides`)**: Explicit input/output USD per 1M tokens mapped by pattern or canonical ID.
+2. **Zero-Cost Providers (`policy.zero_cost_providers`)**: Local inference or free providers (`ollama`, `local`, `vllm`, `llama.cpp`, `opencode`, `lmstudio`, `exo`). Automatically assigned `input_price = 0.0, output_price = 0.0`.
+3. **Zero-Cost Patterns (`policy.zero_cost_patterns`)**: Globs identifying free endpoints (`*free*`, `*:free`, `*-free`).
+4. **Database Records**: Historical benchmark prices stored in `model_prices` table.
+5. **Default Fallback**: `policy.default_input_price` ($5.0) and `policy.default_output_price` ($15.0).
+
+### Cost-Aware Neural Utility Sorting:
+When evaluating candidate models in `neural_rerank`, candidates meeting the phase quality threshold are scored by net utility:
+$$\text{utility} = \text{logit\_score} - (\text{neural\_cost\_weight} \times \lambda_{\text{price}} \times \text{estimated\_cost})$$
+
+For tasks where zero-cost models meet the quality bar, the $0.00 cost provides a distinct advantage over paid cloud endpoints, ensuring local and free resources are prioritized automatically.
+

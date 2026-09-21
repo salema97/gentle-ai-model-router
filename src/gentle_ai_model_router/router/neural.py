@@ -14,7 +14,11 @@ from sqlalchemy.orm import Session
 
 from gentle_ai_model_router.registry.models import ModelBenchmark, ModelPrice
 from gentle_ai_model_router.router.config import RouterConfig
-from gentle_ai_model_router.router.policy import CandidateRanking, RankedCandidate
+from gentle_ai_model_router.router.policy import (
+    CandidateRanking,
+    RankedCandidate,
+    resolve_candidate_price,
+)
 
 # Legacy fallback for ONNX artifacts that predate benchmark_feature_names
 # recording in metrics.json (the historical fixed 15-name training layout).
@@ -149,16 +153,12 @@ def build_candidate_features(
             else 0.0
         )
 
-        price = price_by_deployment.get(c.deployment.id)
-        in_p = (
-            float(price.input_price)
-            if price and price.input_price is not None
-            else float(config.policy.default_input_price)
-        )
-        out_p = (
-            float(price.output_price)
-            if price and price.output_price is not None
-            else float(config.policy.default_output_price)
+        in_p, out_p, _ = resolve_candidate_price(
+            session,
+            c.deployment.id,
+            c.model.canonical_id,
+            c.provider.registry_key if c.provider else None,
+            config.policy,
         )
         tool_calling = 1.0 if c.model.tool_calling else 0.0
         structured_output = 1.0 if c.model.structured_output else 0.0
@@ -227,7 +227,15 @@ def neural_rerank(
     scores = [float(s) for s in raw_scores]
 
     scored = list(zip(candidates_to_score, scores, strict=True))
-    scored.sort(key=lambda item: (item[1], item[0].quality), reverse=True)
+    cost_weight = getattr(config.policy, "neural_cost_weight", 10.0)
+    lambda_p = getattr(config.policy, "lambda_price", 1.0)
+    scored.sort(
+        key=lambda item: (
+            item[1] - (cost_weight * lambda_p * item[0].estimated_cost),
+            item[0].quality,
+        ),
+        reverse=True,
+    )
 
     winner_orig, winner_score = scored[0]
     winner_reasons = tuple(winner_orig.reason_codes) + ("neural_ranker:onnx",)

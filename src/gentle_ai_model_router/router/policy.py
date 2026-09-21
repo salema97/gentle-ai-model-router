@@ -31,6 +31,7 @@ Both the API server and the inspection CLI share :func:`rank_candidates`;
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import logging
@@ -261,6 +262,66 @@ def estimate_cost(
     return tokens * blended / 1_000_000
 
 
+def resolve_candidate_price(
+    session: Session,
+    deployment_id: int,
+    canonical_id: str,
+    provider_name: str | None,
+    policy: PolicyConfig,
+) -> tuple[float, float, list[str]]:
+    """Resolve input/output price for a candidate deployment.
+
+    Precedence:
+    1. policy.pricing_overrides matching canonical_id or provider_name.
+    2. policy.zero_cost_providers matching provider_name or canonical_id prefix.
+    3. policy.zero_cost_patterns matching canonical_id.
+    4. Database row in model_prices table for deployment_id.
+    5. Fallback to policy.default_input_price / policy.default_output_price.
+    """
+    cid_lower = canonical_id.lower()
+    prov_lower = (provider_name or "").lower()
+    prov_prefix = cid_lower.split("/")[0] if "/" in cid_lower else ""
+
+    # 1. Declarative pricing overrides
+    if getattr(policy, "pricing_overrides", None):
+        for pattern, override in policy.pricing_overrides.items():
+            pat_lower = pattern.lower()
+            if fnmatch.fnmatch(cid_lower, pat_lower) or (
+                prov_lower and fnmatch.fnmatch(prov_lower, pat_lower)
+            ):
+                in_p = float(override.get("input", override.get("input_price", 0.0)))
+                out_p = float(override.get("output", override.get("output_price", 0.0)))
+                return in_p, out_p, ["pricing_override"]
+
+    # 2. Zero-cost providers (e.g. ollama, vllm, opencode, local)
+    zero_provs = {p.lower() for p in (getattr(policy, "zero_cost_providers", None) or [])}
+    if (prov_lower and prov_lower in zero_provs) or (prov_prefix and prov_prefix in zero_provs):
+        return 0.0, 0.0, ["zero_cost_provider"]
+
+    # 3. Zero-cost patterns (e.g. *free*, *:free, *-free)
+    for pat in getattr(policy, "zero_cost_patterns", None) or []:
+        if fnmatch.fnmatch(cid_lower, pat.lower()):
+            return 0.0, 0.0, ["zero_cost_pattern"]
+
+    # 4. Database record
+    price = _latest_price(session, deployment_id)
+    if price is not None and (price.input_price is not None or price.output_price is not None):
+        in_p = float(
+            price.input_price if price.input_price is not None else policy.default_input_price
+        )
+        out_p = float(
+            price.output_price if price.output_price is not None else policy.default_output_price
+        )
+        return in_p, out_p, []
+
+    # 5. Fallback default
+    return (
+        float(policy.default_input_price),
+        float(policy.default_output_price),
+        ["missing_price_data:using_default"],
+    )
+
+
 def _passes_hard_filters(
     model: Model, phase: str, context_tokens: int | None, reason_codes: list[str]
 ) -> bool:
@@ -410,24 +471,14 @@ def rank_candidates(
                 multiplier = policy.effort_token_multiplier.get(variant.effort, 1.0)
                 base = max(policy.base_tokens, context.context_tokens or 0)
                 estimated_tokens = base * multiplier
-                price = _latest_price(session, deployment.id)
-                has_price = price is not None and (
-                    price.input_price is not None or price.output_price is not None
+                in_p, out_p, price_reasons = resolve_candidate_price(
+                    session,
+                    deployment.id,
+                    model.canonical_id,
+                    provider.registry_key if provider else None,
+                    policy,
                 )
-                if has_price:
-                    in_p = (
-                        price.input_price
-                        if price.input_price is not None
-                        else policy.default_input_price
-                    )
-                    out_p = (
-                        price.output_price
-                        if price.output_price is not None
-                        else policy.default_output_price
-                    )
-                else:
-                    in_p, out_p = policy.default_input_price, policy.default_output_price
-                    local_reasons.append("missing_price_data:using_default")
+                local_reasons.extend(price_reasons)
                 estimated_cost = estimate_cost(policy, in_p, out_p, estimated_tokens)
                 if speed_rows and model.id in speed_rows:
                     top = max(speed_rows.values())
@@ -468,7 +519,13 @@ def rank_candidates(
     # Minimum-sufficient-effort policy: minimize tokens, break ties by quality,
     # then by canonical id for determinism.
     meeting.sort(
-        key=lambda c: (c.estimated_tokens, -c.quality, c.model.canonical_id, c.variant.effort)
+        key=lambda c: (
+            c.estimated_tokens,
+            c.estimated_cost,
+            -c.quality,
+            c.model.canonical_id,
+            c.variant.effort,
+        )
     )
     ranked = tuple(
         RankedCandidate(

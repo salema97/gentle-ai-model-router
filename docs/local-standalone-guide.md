@@ -133,20 +133,51 @@ with s.session() as sess:
 
 ---
 
-## 5. Zero-Cost Model Prioritization & Cost-Aware Neural Utility
+## 5. Zero-Cost Model Prioritization & Domain Pricing Architecture
 
-To prevent unnecessary expenditure on simple tasks (such as `explore` reads or low-complexity planning), the router incorporates a multi-tier domain pricing resolution engine and cost-aware utility re-ranking:
+To prevent unnecessary expenditure on simple tasks (such as `explore` reads or low-complexity planning), the router incorporates a multi-tier domain pricing resolution engine:
 
 ### Pricing Resolution Precedence:
 1. **Declarative Overrides (`policy.pricing_overrides`)**: Explicit input/output USD per 1M tokens mapped by pattern or canonical ID.
-2. **Zero-Cost Providers (`policy.zero_cost_providers`)**: Local inference or free providers (`ollama`, `local`, `vllm`, `llama.cpp`, `opencode`, `lmstudio`, `exo`). Automatically assigned `input_price = 0.0, output_price = 0.0`.
+2. **Zero-Cost Providers (`policy.zero_cost_providers`)**: Local inference runtimes (`ollama`, `local`, `vllm`, `llama.cpp`, `lmstudio`, `exo`). Automatically assigned `input_price = 0.0, output_price = 0.0`.
 3. **Zero-Cost Patterns (`policy.zero_cost_patterns`)**: Globs identifying free endpoints (`*free*`, `*:free`, `*-free`).
 4. **Database Records**: Historical benchmark prices stored in `model_prices` table.
 5. **Default Fallback**: `policy.default_input_price` ($5.0) and `policy.default_output_price` ($15.0).
 
-### Cost-Aware Neural Utility Sorting:
-When evaluating candidate models in `neural_rerank`, candidates meeting the phase quality threshold are scored by net utility:
-$$\text{utility} = \text{logit\_score} - (\text{neural\_cost\_weight} \times \lambda_{\text{price}} \times \text{estimated\_cost})$$
+---
 
-For tasks where zero-cost models meet the quality bar, the $0.00 cost provides a distinct advantage over paid cloud endpoints, ensuring local and free resources are prioritized automatically.
+## 6. Dynamic Phase-Aware Cost Sensitivity & Quality Dominance
+
+A robust router must never compromise architecture or code correctness to save pennies. To prevent over-prioritizing free models on complex tasks, the router balances net utility dynamically per phase:
+
+$$\text{utility} = \text{logit\_score} - (\text{phase\_cost\_weights}[\text{phase}] \times \lambda_{\text{price}} \times \text{estimated\_cost})$$
+
+### Per-Phase Cost Weights:
+- **Routine & Exploratory Phases (`explore: 4.0`, `tasks: 3.0`, `research: 3.0`, `archive: 4.0`)**: Moderate cost sensitivity. Simple read and checklist tasks prioritize zero-cost models (`nemotron-3-ultra-free`, `qwen-coder-free`) over paid APIs.
+- **Architectural & Generative Phases (`spec: 0.5`, `design: 0.0`, `apply: 0.5`, `verify: 0.5`)**: Cost penalty is zero or negligible. Frontier models with deep reasoning (e.g. `kimi-for-coding`, `claude-sonnet-5`) dominate purely on cognitive capability and benchmark quality.
+
+### Tie-Breaking Precedence:
+In candidate ranking, ties are broken strictly by **quality first**:
+`sort_key = (estimated_tokens, -quality, estimated_cost, canonical_id)`
+Cost only breaks ties between models with identical token requirements and equivalent quality.
+
+---
+
+## 7. SDD Phase Routing Matrix & Behavior
+
+![SDD Benchmark Router](assets/sdd-benchmark-router.jpg)
+![Benchmark Pareto Frontier](assets/benchmark-pareto-frontier.jpg)
+
+### Real-World Decision Examples:
+
+| Phase SDD | Prompt Real de Entrada | Modelo Ganador | Esfuerzo Calibrado | Costo Est. | Razón y Comportamiento |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`explore`** | *"Leer `router.yaml` y verificar puerto API"* | `nemotron-3-ultra-free` | `low` (14k tkn) | **$0.000** | **Lectura pasiva**: Tarea simple de inspección; modelo free resuelve sin costo. |
+| **`tasks`** | *"Desglosar en tareas atómicas con interfaces"* | `nemotron-3-ultra-free` | `medium` (19k tkn) | **$0.000** | **Checklist estructurado**: Generación de listas de tareas atómicas y criterios de aceptación. |
+| **`propose`** | *"Propón estrategia de caching con tradeoffs"* | `kimi-for-coding` | `medium` (19k tkn) | **$0.152** | **Análisis de tradeoffs**: Razonamiento comparativo de arquitecturas y memoria. |
+| **`spec`** | *"Definir especificaciones técnicas OpenAPI estricta"* | `kimi-for-coding` | `high` (26k tkn) | **$0.208** | **Contrato formal**: Schemas Pydantic rigurosos; calidad domina sobre costo. |
+| **`design`** | *"Diseñar arquitectura hexagonal y tolerancia a fallos"* | `kimi-for-coding` | `high` (26k tkn) | **$0.208** | **Arquitectura crítica**: Kimi (+1.255) supera a modelos ligeros (-2.617). |
+| **`apply`** | *"Implementar algoritmo de consenso raft con elecciones"* | `kimi-for-coding` | `medium` (19k tkn) | **$0.152** | **Código de producción**: Implementación compleja con alta precisión sintáctica. |
+| **`verify`** | *"Ejecutar pytest sobre suite de pruebas y analizar cobertura"* | `kimi-for-coding` | `high` (26k tkn) | **$0.208** | **Auditoría estricta**: Ejecución y certificación de tests sin regresiones. |
+
 
